@@ -93,6 +93,13 @@ def sibling_agent_pane(history_pane: str) -> str:
     return ""
 
 
+def target_pane_file() -> Path | None:
+    root = os.environ.get("HERDR_PLUGIN_STATE_DIR")
+    if not root:
+        return None
+    return Path(root) / "target_pane"
+
+
 def invoker_pane() -> str:
     env = os.environ.get("HERDR_SESSION_HISTORY_TARGET") or ""
     if env:
@@ -104,6 +111,11 @@ def invoker_pane() -> str:
             record = pane_record(value)
             if record.get("agent"):
                 return value
+    stored = target_pane_file()
+    if stored and stored.is_file():
+        value = stored.read_text().strip()
+        if value:
+            return value
     me = os.environ.get("HERDR_PANE_ID") or ""
     sibling = sibling_agent_pane(me)
     if sibling:
@@ -636,6 +648,9 @@ def remember_pane() -> None:
 
 def cmd_open() -> int:
     pane = invoker_pane()
+    pending = target_pane_file()
+    if pending and pane:
+        pending.write_text(pane)
     cwd = workspace_cwd()
     env_args: list[str] = []
     if pane:
