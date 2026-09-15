@@ -515,36 +515,98 @@ def resume_args(session: Session) -> tuple[str, list[str]]:
     raise RuntimeError(f"unsupported provider {session.provider}")
 
 
+def pane_record(pane_id: str) -> dict[str, Any]:
+    try:
+        result = herdr("pane", "get", pane_id)
+    except RuntimeError:
+        return {}
+    if isinstance(result, dict):
+        pane = result.get("pane") or result
+        return pane if isinstance(pane, dict) else {}
+    return {}
+
+
+def pane_tab(pane_id: str) -> str:
+    record = pane_record(pane_id)
+    tab = str(record.get("tab_id") or "")
+    if tab:
+        return tab
+    return ""
+
+
+def pane_session_id(pane_id: str) -> str:
+    record = pane_record(pane_id)
+    session = record.get("agent_session") if isinstance(record.get("agent_session"), dict) else {}
+    return str(session.get("value") or "")
+
+
+def pane_has_agent(pane_id: str) -> bool:
+    record = pane_record(pane_id)
+    return bool(record.get("agent"))
+
+
+def stop_agent(pane_id: str, timeout: float = 8.0) -> None:
+    """Return the pane to a shell prompt without closing it."""
+    if not pane_has_agent(pane_id):
+        return
+    deadline = time.time() + timeout
+    keys = ("ctrl+c", "ctrl+c", "ctrl+d")
+    for key in keys:
+        if time.time() > deadline:
+            break
+        try:
+            herdr("agent", "send-keys", pane_id, key)
+        except RuntimeError:
+            try:
+                herdr("pane", "send-keys", pane_id, key)
+            except RuntimeError:
+                pass
+        time.sleep(0.35)
+        if not pane_has_agent(pane_id):
+            return
+    # Last try: some CLIs only leave after a typed exit.
+    if pane_has_agent(pane_id):
+        try:
+            herdr("pane", "send-text", pane_id, "/exit")
+            herdr("pane", "send-keys", pane_id, "enter")
+        except RuntimeError:
+            pass
+        time.sleep(0.4)
+
+
 def resume_session(session: Session, target_pane: str) -> str:
-    if session.live_pane:
-        herdr("agent", "focus", session.live_pane)
-        return f"focused {session.live_pane}"
-    cwd = session.cwd or workspace_cwd() or os.getcwd()
-    split_from = target_pane or os.environ.get("HERDR_PANE_ID") or ""
-    if split_from:
-        created = herdr(
-            "pane",
-            "split",
-            split_from,
-            "--direction",
-            "right",
-            "--cwd",
-            cwd,
-            "--no-focus",
-        )
-    else:
-        created = herdr("pane", "split", "--current", "--direction", "right", "--cwd", cwd, "--no-focus")
-    pane = ""
-    if isinstance(created, dict):
-        pane_obj = created.get("pane") or {}
-        pane = pick_id(pane_obj, "pane_id", "id")
+    """Switch the current tab's conversation pane in place. Never open a new tab/pane."""
+    pane = target_pane or ""
+    history_pane = os.environ.get("HERDR_PANE_ID") or ""
+    if pane == history_pane:
+        pane = ""
     if not pane:
-        raise RuntimeError("split did not return a pane id")
+        raise RuntimeError("no conversation pane on this tab")
+
+    current_id = pane_session_id(pane)
+    if current_id and current_id == session.session_id:
+        herdr("agent", "focus", pane)
+        return "already this session"
+
+    live = session.live_pane
+    if live and live != history_pane and pane_tab(live) == pane_tab(pane):
+        herdr("agent", "focus", live)
+        return f"focused {live}"
+
+    cwd = session.cwd or workspace_cwd() or os.getcwd()
+    stop_agent(pane)
+    if pane_has_agent(pane):
+        raise RuntimeError("could not leave the current agent; try q in that pane first")
+    try:
+        herdr("pane", "run", pane, f"cd {json.dumps(cwd)}")
+        time.sleep(0.2)
+    except RuntimeError:
+        pass
     kind, extra = resume_args(session)
     name = slug_name(session.provider, session.session_id)
     herdr("agent", "start", name, "--kind", kind, "--pane", pane, "--timeout", "60000", "--", *extra)
     herdr("agent", "focus", pane)
-    return f"resumed in {pane} as {name}"
+    return f"switched to {session.title[:40]}"
 
 
 def layout_info(pane_id: str) -> dict[str, Any]:
@@ -693,7 +755,7 @@ class HistoryTUI:
         if session and selected_row is not None and width - card_x >= 18:
             self.draw_card(session, selected_row, card_x, width - card_x, height - 1, now)
 
-        footer = self.status or "click jump  / search  a all  q"
+        footer = self.status or "↑↓ browse  enter switch  / search  q"
         safe_add(stdscr, height - 1, 0, footer, curses.A_DIM)
         stdscr.refresh()
 

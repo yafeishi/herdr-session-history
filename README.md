@@ -16,8 +16,8 @@ herdr plugin action invoke herdr-session-history.open
 
 | Key | Action |
 | --- | --- |
-| `↑` `↓` / hover | Select a row (preview card pops out) |
-| click / `enter` | Jump to that conversation (focus if live, otherwise `--resume`) |
+| `↑` `↓` / `j` `k` | Browse history on this tab (preview card only) |
+| click / `enter` | Switch the current conversation pane in place — no new tab |
 | `/` | Search title / preview / cwd |
 | `a` | Toggle this workspace vs all |
 | `r` | Reload |
