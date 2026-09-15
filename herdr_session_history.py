@@ -360,6 +360,36 @@ def pane_session_id(pane_id: str) -> str:
     return str(session.get("value") or "")
 
 
+def send_keys(pane_id: str, *keys: str) -> None:
+    if not keys:
+        return
+    try:
+        herdr("agent", "send-keys", pane_id, *keys)
+    except RuntimeError:
+        herdr("pane", "send-keys", pane_id, *keys)
+
+
+def jump_scrollback(pane_id: str, from_index: int, to_index: int, primed: bool) -> bool:
+    """Move Grok/Claude scrollback from one user-turn to another. Returns primed."""
+    record = pane_record(pane_id)
+    status = str(record.get("agent_status") or "")
+    if status == "working":
+        raise RuntimeError("wait — this pane is still answering")
+    kind = str(record.get("agent") or "").lower()
+    if kind not in ("grok", "claude", "claude-code", "codex"):
+        raise RuntimeError(f"no scroll jump for {kind or 'this agent'}")
+    if not primed:
+        send_keys(pane_id, "tab")
+        time.sleep(0.08)
+        primed = True
+    delta = to_index - from_index
+    if delta == 0:
+        return primed
+    key = "shift+right" if delta > 0 else "shift+left"
+    send_keys(pane_id, *([key] * abs(delta)))
+    return primed
+
+
 def layout_info(pane_id: str) -> dict[str, Any]:
     try:
         result = herdr("pane", "layout", "--pane", pane_id)
@@ -419,7 +449,11 @@ class HistoryTUI:
         self.source_mtime = 0.0
         self.turns: list[Turn] = []
         self.filtered: list[Turn] = []
+        self.viewed_index = 0
+        self.scrollback_primed = False
         self.reload(follow_latest=True)
+        if self.filtered:
+            self.viewed_index = self.filtered[-1].index
 
     def reload(self, follow_latest: bool = False) -> None:
         self.turns, self.source_mtime = load_turns_for_pane(self.target)
@@ -503,7 +537,7 @@ class HistoryTUI:
         if turn and selected_row is not None and width - card_x >= 18:
             self.draw_card(turn, selected_row, card_x, width - card_x, height - 1)
 
-        footer = self.status or "↑↓ this chat  / search  q"
+        footer = self.status or "↑↓ jump in chat  / search  q"
         safe_add(stdscr, height - 1, 0, footer, curses.A_DIM)
         stdscr.refresh()
 
@@ -564,6 +598,22 @@ class HistoryTUI:
             return index
         return None
 
+    def jump_here(self) -> None:
+        turn = self.current()
+        if turn is None:
+            return
+        try:
+            self.scrollback_primed = jump_scrollback(
+                self.target,
+                self.viewed_index,
+                turn.index,
+                self.scrollback_primed,
+            )
+            self.viewed_index = turn.index
+            self.status = f"#{turn.index + 1}/{len(self.turns)}"
+        except Exception as exc:  # noqa: BLE001
+            self.status = str(exc).splitlines()[0][:80]
+
     def run(self) -> None:
         curses.curs_set(0)
         curses.use_default_colors()
@@ -596,15 +646,18 @@ class HistoryTUI:
                 return
             if key in (curses.KEY_UP, ord("k")):
                 self.cursor = max(0, self.cursor - 1)
+                self.jump_here()
             elif key in (curses.KEY_DOWN, ord("j")):
                 self.cursor = min(max(0, len(self.filtered) - 1), self.cursor + 1)
+                self.jump_here()
             elif key == curses.KEY_PPAGE:
                 self.cursor = max(0, self.cursor - 10)
+                self.jump_here()
             elif key == curses.KEY_NPAGE:
                 self.cursor = min(max(0, len(self.filtered) - 1), self.cursor + 10)
+                self.jump_here()
             elif key in (10, 13):
-                turn = self.current()
-                self.status = f"#{turn.index + 1} {turn.title[:40]}" if turn else ""
+                self.jump_here()
             elif key == ord("/"):
                 self.searching = True
                 self.query = ""
@@ -618,6 +671,7 @@ class HistoryTUI:
                 index = self.index_at(y)
                 if index is not None:
                     self.cursor = index
+                    self.jump_here()
             elif key == curses.KEY_RESIZE:
                 continue
 
