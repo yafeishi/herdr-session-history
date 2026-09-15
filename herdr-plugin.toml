@@ -1,0 +1,17 @@
+id = "herdr-session-history"
+name = "Herdr Session History"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Codex-style session history list for Grok, Claude, Codex, and Agy. Browse past conversations and resume them in a pane."
+platforms = ["macos", "linux"]
+
+[[actions]]
+id = "open"
+title = "Open session history"
+command = ["python3", "herdr_session_history.py", "open"]
+
+[[panes]]
+id = "history"
+title = "Sessions"
+placement = "split"
+command = ["python3", "herdr_session_history.py", "tui"]
