@@ -1,39 +1,32 @@
 #!/usr/bin/env python3
-"""Codex-style session history for Herdr: list, preview, resume."""
+"""Per-pane conversation history rail for Herdr."""
 
 from __future__ import annotations
 
 import curses
 import json
 import os
-import sqlite3
+import re
 import subprocess
 import sys
 import time
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote
 
 HOME = Path.home()
-PROVIDERS = ("grok", "claude", "codex", "agy")
-LABEL = {"grok": "grok", "claude": "clau", "codex": "cdx", "agy": "agy"}
-MAX_CODEX = 180
-MAX_CLAUDE = 180
-MAX_AGY = 180
+USER_QUERY_RE = re.compile(r"<user_query>\s*(.*?)\s*</user_query>", re.S)
 
 
 @dataclass
-class Session:
-    provider: str
-    session_id: str
+class Turn:
+    index: int
     title: str
     preview: str
-    cwd: str
-    updated_at: float
-    live_pane: str | None = None
+    updated_at: float = 0.0
+    current: bool = False
 
 
 def herdr_bin() -> str:
@@ -148,50 +141,115 @@ def pad(text: str, width: int) -> str:
     return text + (" " * max(0, extra))
 
 
-def rel_time(ts: float, now: float | None = None) -> str:
-    now = now or time.time()
-    if ts <= 0:
-        return "?"
-    delta = max(0, int(now - ts))
-    if delta < 60:
-        return "now"
-    if delta < 3600:
-        return f"{delta // 60}m"
-    if delta < 86400:
-        return f"{delta // 3600}h"
-    if delta < 86400 * 7:
-        return f"{delta // 86400}d"
-    local = datetime.fromtimestamp(ts).strftime("%m-%d")
-    return local
+def content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+            elif isinstance(item, dict) and isinstance(item.get("input_text"), str):
+                parts.append(item["input_text"])
+        return "\n".join(parts)
+    if isinstance(content, dict):
+        return content_text(content.get("content") or content.get("text") or "")
+    return ""
 
 
-def parse_time(value: Any) -> float:
-    if value is None:
-        return 0.0
-    if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value).strip()
-    if not text:
-        return 0.0
-    if text.isdigit():
-        n = int(text)
-        return n / 1000 if n > 10_000_000_000 else float(n)
-    text = text.replace("Z", "+00:00")
-    try:
-        dt = datetime.fromisoformat(text)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.timestamp()
-    except ValueError:
-        return 0.0
+def grok_chat_path(cwd: str, session_id: str) -> Path:
+    return HOME / ".grok" / "sessions" / quote(cwd, safe="") / session_id / "chat_history.jsonl"
 
 
-def file_uri_path(uri: str) -> str:
-    uri = uri.strip()
-    if uri.startswith("file://"):
-        parsed = urlparse(uri)
-        return unquote(parsed.path)
-    return unquote(uri)
+def claude_chat_path(cwd: str, session_id: str) -> Path:
+    encoded = cwd.replace("/", "-")
+    if encoded.startswith("-"):
+        pass
+    else:
+        encoded = "-" + encoded.lstrip("-")
+    # Claude stores /Users/dang/AICODING as -Users-dang-AICODING
+    encoded = cwd.replace("/", "-")
+    return HOME / ".claude" / "projects" / encoded / f"{session_id}.jsonl"
+
+
+def turns_from_grok(path: Path) -> list[Turn]:
+    turns: list[Turn] = []
+    replies: list[str] = []
+    mtime = path.stat().st_mtime
+
+    def flush_reply() -> None:
+        if turns and replies:
+            body = turns[-1].preview
+            reply = "\n".join(replies).strip()
+            turns[-1].preview = (body + "\n\n" + reply).strip() if body else reply
+        replies.clear()
+
+    with path.open() as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            kind = obj.get("type")
+            if kind == "user":
+                text = content_text(obj.get("content"))
+                match = USER_QUERY_RE.search(text)
+                if not match:
+                    continue
+                flush_reply()
+                query = match.group(1).strip()
+                title = query.splitlines()[0][:80] if query else "(untitled)"
+                turns.append(Turn(index=len(turns), title=title, preview=query, updated_at=mtime))
+            elif kind == "assistant":
+                text = content_text(obj.get("content")).strip()
+                if text:
+                    replies.append(text)
+    flush_reply()
+    if turns:
+        turns[-1].current = True
+    return turns
+
+
+def turns_from_claude(path: Path) -> list[Turn]:
+    turns: list[Turn] = []
+    replies: list[str] = []
+    mtime = path.stat().st_mtime
+
+    def flush_reply() -> None:
+        if turns and replies:
+            turns[-1].preview = (turns[-1].preview + "\n\n" + "\n".join(replies)).strip()
+        replies.clear()
+
+    with path.open() as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            kind = obj.get("type")
+            if kind == "user":
+                text = first_user_text(obj.get("message") or obj)
+                if not text or text.lstrip().startswith("<"):
+                    continue
+                flush_reply()
+                title = text.splitlines()[0][:80]
+                turns.append(Turn(index=len(turns), title=title, preview=text, updated_at=mtime))
+            elif kind == "assistant":
+                text = first_user_text(obj.get("message") or obj)
+                if text:
+                    replies.append(text)
+    flush_reply()
+    if turns:
+        turns[-1].current = True
+    return turns
 
 
 def first_user_text(message: Any) -> str:
@@ -216,303 +274,31 @@ def first_user_text(message: Any) -> str:
     return ""
 
 
-def looks_like_meta(text: str) -> bool:
-    stripped = text.lstrip()
-    return stripped.startswith("<") or stripped.startswith("# ") and "policy" in stripped.lower()
-
-
-# --- indexers -----------------------------------------------------------------
-
-
-def index_grok() -> list[Session]:
-    db = HOME / ".grok" / "sessions" / "session_search.sqlite"
-    if not db.is_file():
-        return []
-    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    rows = conn.execute(
-        "SELECT session_id, cwd, updated_at, title, content FROM session_docs"
-    ).fetchall()
-    conn.close()
-    sessions: list[Session] = []
-    for session_id, cwd, updated_at, title, content in rows:
-        preview = (content or "").strip()
-        heading = (title or "").strip()
-        if not heading and preview:
-            heading = preview.splitlines()[0][:80]
-        sessions.append(
-            Session(
-                provider="grok",
-                session_id=str(session_id),
-                title=heading or "(untitled)",
-                preview=preview,
-                cwd=str(cwd or ""),
-                updated_at=parse_time(updated_at),
-            )
-        )
-    return sessions
-
-
-def index_claude() -> list[Session]:
-    root = HOME / ".claude" / "projects"
-    if not root.is_dir():
-        return []
-    files = sorted(root.glob("*/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    sessions: list[Session] = []
-    for path in files[:MAX_CLAUDE]:
-        try:
-            session = parse_claude(path)
-        except OSError:
-            continue
-        if session:
-            sessions.append(session)
-    return sessions
-
-
-def parse_claude(path: Path) -> Session | None:
-    session_id = path.stem
-    title = ""
-    cwd = ""
-    preview_parts: list[str] = []
-    updated = path.stat().st_mtime
-    try:
-        with path.open() as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                kind = obj.get("type")
-                if kind == "ai-title" and not title:
-                    title = str(obj.get("aiTitle") or obj.get("title") or "").strip()
-                if not cwd and isinstance(obj.get("cwd"), str):
-                    cwd = obj["cwd"]
-                ts = parse_time(obj.get("timestamp"))
-                if ts:
-                    updated = max(updated, ts)
-                if kind == "user":
-                    text = first_user_text(obj.get("message"))
-                    if text and not looks_like_meta(text):
-                        preview_parts.append(text)
-                        if not title:
-                            title = text.splitlines()[0][:80]
-                if len(preview_parts) >= 4:
-                    # keep scanning for title/cwd/time
-                    if title and cwd:
-                        break
-    except OSError:
-        return None
-    if not cwd:
-        encoded = path.parent.name
-        cwd = "/" + encoded.replace("-", "/").lstrip("/")
-    return Session(
-        provider="claude",
-        session_id=session_id,
-        title=title or "(untitled)",
-        preview="\n\n".join(preview_parts),
-        cwd=cwd,
-        updated_at=updated,
-    )
-
-
-def index_codex() -> list[Session]:
-    root = HOME / ".codex" / "sessions"
-    if not root.is_dir():
-        return []
-    files = sorted(root.rglob("rollout-*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    sessions: list[Session] = []
-    for path in files[:MAX_CODEX]:
-        try:
-            session = parse_codex(path)
-        except OSError:
-            continue
-        if session:
-            sessions.append(session)
-    return sessions
-
-
-def parse_codex(path: Path) -> Session | None:
-    session_id = ""
-    cwd = ""
-    title = ""
-    preview_parts: list[str] = []
-    updated = path.stat().st_mtime
-    try:
-        with path.open() as handle:
-            for index, line in enumerate(handle):
-                if index > 80 and title and cwd:
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                ts = parse_time(obj.get("timestamp"))
-                if ts:
-                    updated = max(updated, ts)
-                payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
-                kind = obj.get("type")
-                if kind == "session_meta":
-                    session_id = str(payload.get("session_id") or payload.get("id") or session_id)
-                    if isinstance(payload.get("cwd"), str):
-                        cwd = payload["cwd"]
-                if kind == "turn_context" and isinstance(payload.get("cwd"), str) and not cwd:
-                    cwd = payload["cwd"]
-                if payload.get("type") == "message" and payload.get("role") == "user":
-                    text = first_user_text(payload)
-                    if text and not looks_like_meta(text):
-                        preview_parts.append(text)
-                        if not title:
-                            title = text.splitlines()[0][:80]
-    except OSError:
-        return None
+def load_turns_for_pane(pane_id: str) -> tuple[list[Turn], float]:
+    """Turns of the conversation currently in pane_id. Independent per pane."""
+    record = pane_record(pane_id)
+    kind = str(record.get("agent") or "").lower()
+    if kind in ("antigravity", "antigravity-cli"):
+        kind = "agy"
+    session_id = pane_session_id(pane_id)
+    cwd = str(record.get("cwd") or record.get("foreground_cwd") or workspace_cwd() or "")
     if not session_id:
-        # rollout-...-<uuid>.jsonl
-        name = path.stem
-        session_id = name.rsplit("-", 5)
-        session_id = "-".join(name.split("-")[-5:]) if name.count("-") >= 5 else name
-    return Session(
-        provider="codex",
-        session_id=session_id,
-        title=title or "(untitled)",
-        preview="\n\n".join(preview_parts),
-        cwd=cwd,
-        updated_at=updated,
-    )
-
-
-def index_agy() -> list[Session]:
-    sessions: dict[str, Session] = {}
-    db = HOME / ".gemini" / "antigravity-cli" / "conversation_summaries.db"
-    if db.is_file():
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-        try:
-            rows = conn.execute(
-                "SELECT conversation_id, title, preview, last_modified_time, workspace_uris "
-                "FROM conversation_summaries"
-            ).fetchall()
-        except sqlite3.DatabaseError:
-            rows = []
-        conn.close()
-        for conv_id, title, preview, modified, uris in rows:
-            cwd = ""
-            try:
-                parsed = json.loads(uris or "[]")
-                if isinstance(parsed, list) and parsed:
-                    cwd = file_uri_path(str(parsed[0]))
-            except json.JSONDecodeError:
-                cwd = ""
-            text = (preview or "").strip()
-            sessions[str(conv_id)] = Session(
-                provider="agy",
-                session_id=str(conv_id),
-                title=(title or "").strip() or (text.splitlines()[0][:80] if text else "(untitled)"),
-                preview=text,
-                cwd=cwd,
-                updated_at=parse_time(modified),
-            )
-    conv_dir = HOME / ".gemini" / "antigravity-cli" / "conversations"
-    if conv_dir.is_dir():
-        for path in list(conv_dir.glob("*.db"))[:MAX_AGY]:
-            conv_id = path.stem
-            existing = sessions.get(conv_id)
-            mtime = path.stat().st_mtime
-            if existing:
-                existing.updated_at = max(existing.updated_at, mtime)
-            else:
-                sessions[conv_id] = Session(
-                    provider="agy",
-                    session_id=conv_id,
-                    title=f"agy {conv_id[:8]}",
-                    preview="",
-                    cwd="",
-                    updated_at=mtime,
-                )
-    return list(sessions.values())
-
-
-def live_sessions() -> dict[tuple[str, str], str]:
-    mapping: dict[tuple[str, str], str] = {}
-    try:
-        result = herdr("agent", "list")
-    except RuntimeError:
-        return mapping
-    agents = result.get("agents") if isinstance(result, dict) else None
-    if not isinstance(agents, list):
-        return mapping
-    for agent in agents:
-        if not isinstance(agent, dict):
-            continue
-        kind = str(agent.get("agent") or "").lower()
-        if kind in ("antigravity", "antigravity-cli"):
-            kind = "agy"
-        pane_id = str(agent.get("pane_id") or "")
-        session = agent.get("agent_session") if isinstance(agent.get("agent_session"), dict) else {}
-        value = str(session.get("value") or "")
-        if kind and value and pane_id:
-            mapping[(kind, value)] = pane_id
-        tokens = agent.get("tokens") if isinstance(agent.get("tokens"), dict) else {}
-        topic = str(tokens.get("quota_topic") or "").strip()
-        if kind == "agy" and value and topic:
-            # fill title later
-            mapping[(kind, value + "::topic")] = topic  # type: ignore[assignment]
-    return mapping
-
-
-def attach_live(sessions: list[Session]) -> None:
-    live = live_sessions()
-    for session in sessions:
-        pane = live.get((session.provider, session.session_id))
-        if pane:
-            session.live_pane = pane
-        topic = live.get((session.provider, session.session_id + "::topic"))
-        if topic and (not session.title or session.title.startswith("agy ")):
-            session.title = str(topic).splitlines()[0][:80]
-
-
-def load_sessions() -> list[Session]:
-    sessions: list[Session] = []
-    for loader in (index_grok, index_claude, index_codex, index_agy):
-        try:
-            sessions.extend(loader())
-        except Exception as exc:  # noqa: BLE001 — one provider must not kill the list
-            sys.stderr.write(f"{loader.__name__}: {exc}\n")
-    attach_live(sessions)
-    sessions.sort(key=lambda item: item.updated_at, reverse=True)
-    return sessions
-
-
-def same_cwd(session_cwd: str, current: str) -> bool:
-    if not session_cwd or not current:
-        return False
-    try:
-        left = Path(session_cwd).expanduser().resolve()
-        right = Path(current).expanduser().resolve()
-    except OSError:
-        return os.path.normpath(session_cwd) == os.path.normpath(current)
-    return left == right or right in left.parents or left in right.parents
-
-
-def slug_name(provider: str, session_id: str) -> str:
-    token = session_id.replace("-", "")[:8].lower()
-    name = f"h{provider[0]}{token}"
-    return name[:32]
-
-
-def resume_args(session: Session) -> tuple[str, list[str]]:
-    if session.provider == "grok":
-        return "grok", ["--resume", session.session_id]
-    if session.provider == "claude":
-        return "claude", ["--resume", session.session_id]
-    if session.provider == "codex":
-        return "codex", ["resume", session.session_id]
-    if session.provider == "agy":
-        return "agy", [f"--conversation={session.session_id}"]
-    raise RuntimeError(f"unsupported provider {session.provider}")
+        return [], 0.0
+    if kind == "grok":
+        path = grok_chat_path(cwd, session_id)
+        if path.is_file():
+            return turns_from_grok(path), path.stat().st_mtime
+    if kind in ("claude", "claude-code"):
+        path = claude_chat_path(cwd, session_id)
+        if path.is_file():
+            return turns_from_claude(path), path.stat().st_mtime
+        # encoded project dirs may not match cwd exactly
+        root = HOME / ".claude" / "projects"
+        if root.is_dir():
+            match = next(root.glob(f"*/{session_id}.jsonl"), None)
+            if match:
+                return turns_from_claude(match), match.stat().st_mtime
+    return [], 0.0
 
 
 def pane_record(pane_id: str) -> dict[str, Any]:
@@ -538,75 +324,6 @@ def pane_session_id(pane_id: str) -> str:
     record = pane_record(pane_id)
     session = record.get("agent_session") if isinstance(record.get("agent_session"), dict) else {}
     return str(session.get("value") or "")
-
-
-def pane_has_agent(pane_id: str) -> bool:
-    record = pane_record(pane_id)
-    return bool(record.get("agent"))
-
-
-def stop_agent(pane_id: str, timeout: float = 8.0) -> None:
-    """Return the pane to a shell prompt without closing it."""
-    if not pane_has_agent(pane_id):
-        return
-    deadline = time.time() + timeout
-    keys = ("ctrl+c", "ctrl+c", "ctrl+d")
-    for key in keys:
-        if time.time() > deadline:
-            break
-        try:
-            herdr("agent", "send-keys", pane_id, key)
-        except RuntimeError:
-            try:
-                herdr("pane", "send-keys", pane_id, key)
-            except RuntimeError:
-                pass
-        time.sleep(0.35)
-        if not pane_has_agent(pane_id):
-            return
-    # Last try: some CLIs only leave after a typed exit.
-    if pane_has_agent(pane_id):
-        try:
-            herdr("pane", "send-text", pane_id, "/exit")
-            herdr("pane", "send-keys", pane_id, "enter")
-        except RuntimeError:
-            pass
-        time.sleep(0.4)
-
-
-def resume_session(session: Session, target_pane: str) -> str:
-    """Switch the current tab's conversation pane in place. Never open a new tab/pane."""
-    pane = target_pane or ""
-    history_pane = os.environ.get("HERDR_PANE_ID") or ""
-    if pane == history_pane:
-        pane = ""
-    if not pane:
-        raise RuntimeError("no conversation pane on this tab")
-
-    current_id = pane_session_id(pane)
-    if current_id and current_id == session.session_id:
-        herdr("agent", "focus", pane)
-        return "already this session"
-
-    live = session.live_pane
-    if live and live != history_pane and pane_tab(live) == pane_tab(pane):
-        herdr("agent", "focus", live)
-        return f"focused {live}"
-
-    cwd = session.cwd or workspace_cwd() or os.getcwd()
-    stop_agent(pane)
-    if pane_has_agent(pane):
-        raise RuntimeError("could not leave the current agent; try q in that pane first")
-    try:
-        herdr("pane", "run", pane, f"cd {json.dumps(cwd)}")
-        time.sleep(0.2)
-    except RuntimeError:
-        pass
-    kind, extra = resume_args(session)
-    name = slug_name(session.provider, session.session_id)
-    herdr("agent", "start", name, "--kind", kind, "--pane", pane, "--timeout", "60000", "--", *extra)
-    herdr("agent", "focus", pane)
-    return f"switched to {session.title[:40]}"
 
 
 def layout_info(pane_id: str) -> dict[str, Any]:
@@ -658,38 +375,34 @@ def safe_add(stdscr: curses.window, y: int, x: int, text: str, attr: int = 0) ->
 class HistoryTUI:
     def __init__(self, stdscr: curses.window) -> None:
         self.stdscr = stdscr
-        self.cwd = workspace_cwd()
         self.target = invoker_pane()
-        self.cwd_only = True
         self.query = ""
         self.searching = False
         self.cursor = 0
         self.scroll = 0
         self.status = ""
         self.body_top = 1
-        self.sessions: list[Session] = []
-        self.filtered: list[Session] = []
-        self.reload()
+        self.source_mtime = 0.0
+        self.turns: list[Turn] = []
+        self.filtered: list[Turn] = []
+        self.reload(follow_latest=True)
 
-    def reload(self) -> None:
-        self.sessions = load_sessions()
+    def reload(self, follow_latest: bool = False) -> None:
+        self.turns, self.source_mtime = load_turns_for_pane(self.target)
+        previous_last = follow_latest or (self.filtered and self.cursor == len(self.filtered) - 1)
         self.apply_filter()
+        if previous_last and self.filtered:
+            self.cursor = len(self.filtered) - 1
         self.status = ""
 
     def apply_filter(self) -> None:
-        items = self.sessions
-        if self.cwd_only and self.cwd:
-            items = [item for item in items if same_cwd(item.cwd, self.cwd)]
+        items = self.turns
         needle = self.query.strip().lower()
         if needle:
             items = [
                 item
                 for item in items
-                if needle in item.title.lower()
-                or needle in item.preview.lower()
-                or needle in item.cwd.lower()
-                or needle in item.provider
-                or needle in item.session_id.lower()
+                if needle in item.title.lower() or needle in item.preview.lower()
             ]
         self.filtered = items
         if self.cursor >= len(self.filtered):
@@ -697,7 +410,7 @@ class HistoryTUI:
         if self.cursor < 0:
             self.cursor = 0
 
-    def current(self) -> Session | None:
+    def current(self) -> Turn | None:
         if not self.filtered:
             return None
         return self.filtered[self.cursor]
@@ -717,7 +430,6 @@ class HistoryTUI:
         height, width = stdscr.getmaxyx()
         body_top, body_h, list_width = self.row_geometry()
         self.body_top = body_top
-        now = time.time()
         if self.searching:
             header = f"/{self.query}▌"
         else:
@@ -732,17 +444,19 @@ class HistoryTUI:
 
         visible = self.filtered[self.scroll : self.scroll + body_h]
         selected_row = None
-        for offset, session in enumerate(visible):
+        if not visible:
+            safe_add(stdscr, body_top, 0, "no turns in this pane", curses.A_DIM)
+        for offset, turn in enumerate(visible):
             row = body_top + offset
             selected = (self.scroll + offset) == self.cursor
             if selected:
                 selected_row = row
-            title = session.title or "(untitled)"
+            title = turn.title or "(untitled)"
             if selected:
-                tick = "━━━━" if session.live_pane else "━━━"
+                tick = "━━━━" if turn.current else "━━━"
                 attr = curses.A_BOLD
             else:
-                tick = "  ● " if session.live_pane else "  ─ "
+                tick = "  ● " if turn.current else "  ─ "
                 attr = curses.A_DIM
             if width < 18:
                 line = tick
@@ -750,30 +464,27 @@ class HistoryTUI:
                 line = f"{tick} {title}"
             safe_add(stdscr, row, 0, pad(line, list_width), attr)
 
-        session = self.current()
+        turn = self.current()
         card_x = list_width + 1
-        if session and selected_row is not None and width - card_x >= 18:
-            self.draw_card(session, selected_row, card_x, width - card_x, height - 1, now)
+        if turn and selected_row is not None and width - card_x >= 18:
+            self.draw_card(turn, selected_row, card_x, width - card_x, height - 1)
 
-        footer = self.status or "↑↓ browse  enter switch  / search  q"
+        footer = self.status or "↑↓ this chat  / search  q"
         safe_add(stdscr, height - 1, 0, footer, curses.A_DIM)
         stdscr.refresh()
 
     def draw_card(
         self,
-        session: Session,
+        turn: Turn,
         row: int,
         x: int,
         max_width: int,
         max_bottom: int,
-        now: float,
     ) -> None:
         inner_w = min(42, max(16, max_width - 2))
-        snippets = self.card_snippets(session, inner_w)
-        # 4 preview bars like the screenshot, plus a title line.
-        lines = [clip(session.title or "(untitled)", inner_w)] + snippets[:4]
+        snippets = self.card_snippets(turn, inner_w)
+        lines = [clip(turn.title or "(untitled)", inner_w)] + snippets[:4]
         box_h = len(lines) + 2
-        box_w = inner_w + 2
         top = row - 1
         if top < 0:
             top = 0
@@ -782,7 +493,6 @@ class HistoryTUI:
         attr = curses.A_DIM
         safe_add(self.stdscr, top, x, "╭" + ("─" * inner_w) + "╮", attr)
         for index, line in enumerate(lines):
-            # Vary bar length so it reads as a chat card, not a table.
             if index == 0:
                 content = pad(line, inner_w)
                 line_attr = curses.A_BOLD
@@ -792,15 +502,15 @@ class HistoryTUI:
                 line_attr = curses.A_DIM
             safe_add(self.stdscr, top + 1 + index, x, "│" + content + "│", line_attr)
         safe_add(self.stdscr, top + box_h - 1, x, "╰" + ("─" * inner_w) + "╯", attr)
-        meta = f"{session.provider}  {rel_time(session.updated_at, now)}"
-        if session.live_pane:
-            meta += "  live"
+        meta = f"#{turn.index + 1}/{len(self.turns)}"
+        if turn.current:
+            meta += "  now"
         if top + box_h < max_bottom:
             safe_add(self.stdscr, top + box_h, x + 1, meta, curses.A_DIM)
 
-    def card_snippets(self, session: Session, width: int) -> list[str]:
+    def card_snippets(self, turn: Turn, width: int) -> list[str]:
         parts: list[str] = []
-        for raw in (session.preview or "").splitlines():
+        for raw in (turn.preview or "").splitlines():
             text = " ".join(raw.split())
             if not text:
                 continue
@@ -808,22 +518,8 @@ class HistoryTUI:
             if len(parts) >= 4:
                 break
         if not parts:
-            parts = [clip(session.cwd or "empty session", width)]
+            parts = ["(empty)"]
         return parts
-
-    def resume(self) -> None:
-        session = self.current()
-        if session is None:
-            self.status = "nothing selected"
-            return
-        self.status = "opening…"
-        self.draw()
-        try:
-            self.status = resume_session(session, self.target)
-            attach_live(self.sessions)
-            self.apply_filter()
-        except Exception as exc:  # noqa: BLE001
-            self.status = str(exc).splitlines()[0][:120]
 
     def index_at(self, y: int) -> int | None:
         body_top, body_h, _ = self.row_geometry()
@@ -837,89 +533,66 @@ class HistoryTUI:
     def run(self) -> None:
         curses.curs_set(0)
         curses.use_default_colors()
-        self.stdscr.nodelay(False)
+        self.stdscr.timeout(700)
         self.stdscr.keypad(True)
-        # Click only. Motion reports jump the cursor to the pointer on open.
-        curses.mousemask(curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED | curses.BUTTON1_DOUBLE_CLICKED)
-        try:
-            while True:
-                self.draw()
-                key = self.stdscr.getch()
-                if self.searching:
-                    if key in (27,):
-                        self.searching = False
-                        self.query = ""
-                        self.apply_filter()
-                    elif key in (curses.KEY_BACKSPACE, 127, 8):
-                        self.query = self.query[:-1]
-                        self.apply_filter()
-                    elif key in (10, 13):
-                        self.searching = False
-                    elif 32 <= key <= 126:
-                        self.query += chr(key)
-                        self.apply_filter()
-                    continue
-                if key in (ord("q"), 27):
-                    return
-                if key in (curses.KEY_UP, ord("k")):
-                    self.cursor = max(0, self.cursor - 1)
-                elif key in (curses.KEY_DOWN, ord("j")):
-                    self.cursor = min(max(0, len(self.filtered) - 1), self.cursor + 1)
-                elif key == curses.KEY_PPAGE:
-                    self.cursor = max(0, self.cursor - 10)
-                elif key == curses.KEY_NPAGE:
-                    self.cursor = min(max(0, len(self.filtered) - 1), self.cursor + 10)
-                elif key in (10, 13):
-                    self.resume()
-                elif key == ord("/"):
-                    self.searching = True
-                    self.query = ""
-                elif key == ord("a"):
-                    self.cwd_only = not self.cwd_only
-                    self.apply_filter()
-                elif key == ord("r"):
+        curses.mousemask(curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED)
+        while True:
+            self.draw()
+            key = self.stdscr.getch()
+            if key == -1:
+                _turns, mtime = load_turns_for_pane(self.target)
+                if mtime != self.source_mtime:
                     self.reload()
-                elif key == curses.KEY_MOUSE:
-                    try:
-                        _, _x, y, _, bstate = curses.getmouse()
-                    except curses.error:
-                        continue
-                    index = self.index_at(y)
-                    if index is None:
-                        continue
-                    self.cursor = index
-                    clicked = bool(
-                        bstate
-                        & (
-                            curses.BUTTON1_CLICKED
-                            | curses.BUTTON1_PRESSED
-                            | curses.BUTTON1_DOUBLE_CLICKED
-                        )
-                    )
-                    if clicked:
-                        self.resume()
-                elif key == curses.KEY_RESIZE:
+                continue
+            if self.searching:
+                if key in (27,):
+                    self.searching = False
+                    self.query = ""
+                    self.apply_filter()
+                elif key in (curses.KEY_BACKSPACE, 127, 8):
+                    self.query = self.query[:-1]
+                    self.apply_filter()
+                elif key in (10, 13):
+                    self.searching = False
+                elif 32 <= key <= 126:
+                    self.query += chr(key)
+                    self.apply_filter()
+                continue
+            if key in (ord("q"), 27):
+                return
+            if key in (curses.KEY_UP, ord("k")):
+                self.cursor = max(0, self.cursor - 1)
+            elif key in (curses.KEY_DOWN, ord("j")):
+                self.cursor = min(max(0, len(self.filtered) - 1), self.cursor + 1)
+            elif key == curses.KEY_PPAGE:
+                self.cursor = max(0, self.cursor - 10)
+            elif key == curses.KEY_NPAGE:
+                self.cursor = min(max(0, len(self.filtered) - 1), self.cursor + 10)
+            elif key in (10, 13):
+                turn = self.current()
+                self.status = f"#{turn.index + 1} {turn.title[:40]}" if turn else ""
+            elif key == ord("/"):
+                self.searching = True
+                self.query = ""
+            elif key == ord("r"):
+                self.reload()
+            elif key == curses.KEY_MOUSE:
+                try:
+                    _, _x, y, _, _bstate = curses.getmouse()
+                except curses.error:
                     continue
-        finally:
-            pass
+                index = self.index_at(y)
+                if index is not None:
+                    self.cursor = index
+            elif key == curses.KEY_RESIZE:
+                continue
 
 
-def cmd_list(show_all: bool) -> int:
-    cwd = workspace_cwd()
-    sessions = load_sessions()
-    rows = sessions if show_all else [item for item in sessions if same_cwd(item.cwd, cwd)]
-    payload = [
-        {
-            "provider": item.provider,
-            "id": item.session_id,
-            "title": item.title,
-            "cwd": item.cwd,
-            "updated_at": item.updated_at,
-            "live_pane": item.live_pane,
-        }
-        for item in rows[:80]
-    ]
-    json.dump({"cwd": cwd, "count": len(rows), "sessions": payload}, sys.stdout, ensure_ascii=False, indent=2)
+def cmd_list(_show_all: bool) -> int:
+    pane = invoker_pane()
+    turns, _mtime = load_turns_for_pane(pane)
+    payload = [{"index": item.index, "title": item.title, "current": item.current} for item in turns]
+    json.dump({"pane": pane, "count": len(turns), "turns": payload}, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
     return 0
 
@@ -934,8 +607,9 @@ def state_pane_file() -> Path | None:
 def remember_pane() -> None:
     path = state_pane_file()
     pane = os.environ.get("HERDR_PANE_ID") or ""
+    target = os.environ.get("HERDR_SESSION_HISTORY_TARGET") or ""
     if path and pane:
-        path.write_text(pane)
+        path.write_text(f"{pane}\t{target}")
 
 
 def cmd_open() -> int:
@@ -948,8 +622,8 @@ def cmd_open() -> int:
         env_args.extend(["--env", f"HERDR_SESSION_HISTORY_CWD={cwd}"])
     stored = state_pane_file()
     if stored and stored.is_file():
-        existing = stored.read_text().strip()
-        if existing:
+        existing, _, bound = stored.read_text().strip().partition("\t")
+        if existing and bound == pane:
             try:
                 herdr("plugin", "pane", "focus", existing)
                 return 0
@@ -976,7 +650,7 @@ def cmd_open() -> int:
     if hist:
         remember = state_pane_file()
         if remember:
-            remember.write_text(hist)
+            remember.write_text(f"{hist}\t{pane}")
         dock_as_left_rail(hist, pane)
     return 0
 
