@@ -543,10 +543,75 @@ def resume_session(session: Session, target_pane: str) -> str:
     kind, extra = resume_args(session)
     name = slug_name(session.provider, session.session_id)
     herdr("agent", "start", name, "--kind", kind, "--pane", pane, "--timeout", "60000", "--", *extra)
+    herdr("agent", "focus", pane)
     return f"resumed in {pane} as {name}"
 
 
+def layout_info(pane_id: str) -> dict[str, Any]:
+    try:
+        result = herdr("pane", "layout", "--pane", pane_id)
+    except RuntimeError:
+        return {}
+    if isinstance(result, dict):
+        return result.get("layout") or result
+    return {}
+
+
+def dock_as_left_rail(history_pane: str, conversation_pane: str) -> None:
+    """Put the history pane on the left of the conversation, then shrink it."""
+    if not history_pane or not conversation_pane or history_pane == conversation_pane:
+        return
+    layout = layout_info(history_pane)
+    panes = layout.get("panes") if isinstance(layout, dict) else None
+    if not isinstance(panes, list):
+        return
+    mine = next((item for item in panes if item.get("pane_id") == history_pane), None)
+    other = next((item for item in panes if item.get("pane_id") == conversation_pane), None)
+    if not isinstance(mine, dict) or not isinstance(other, dict):
+        return
+    my_x = int((mine.get("rect") or {}).get("x") or 0)
+    other_x = int((other.get("rect") or {}).get("x") or 0)
+    if my_x > other_x:
+        try:
+            herdr("pane", "swap", "--source-pane", history_pane, "--target-pane", conversation_pane)
+        except RuntimeError:
+            return
+        layout = layout_info(history_pane)
+        panes = layout.get("panes") if isinstance(layout, dict) else []
+        mine = next((item for item in panes if item.get("pane_id") == history_pane), mine)
+    width = int((mine.get("rect") or {}).get("width") or 0)
+    if width <= 32:
+        return
+    # Grow the conversation pane leftward so the rail stays a thin column.
+    try:
+        herdr(
+            "pane",
+            "resize",
+            "--pane",
+            conversation_pane,
+            "--direction",
+            "left",
+            "--amount",
+            str(max(8, width - 28)),
+        )
+    except RuntimeError:
+        try:
+            herdr("pane", "resize", "--pane", conversation_pane, "--direction", "left", "--amount", "0.25")
+        except RuntimeError:
+            pass
+
+
 # --- TUI ----------------------------------------------------------------------
+
+
+def safe_add(stdscr: curses.window, y: int, x: int, text: str, attr: int = 0) -> None:
+    height, width = stdscr.getmaxyx()
+    if y < 0 or y >= height or x >= width or x < 0:
+        return
+    try:
+        stdscr.addstr(y, x, clip(text, width - x), attr)
+    except curses.error:
+        pass
 
 
 class HistoryTUI:
@@ -560,14 +625,16 @@ class HistoryTUI:
         self.cursor = 0
         self.scroll = 0
         self.status = ""
+        self.body_top = 1
         self.sessions: list[Session] = []
         self.filtered: list[Session] = []
         self.reload()
+        dock_as_left_rail(os.environ.get("HERDR_PANE_ID") or "", self.target)
 
     def reload(self) -> None:
         self.sessions = load_sessions()
         self.apply_filter()
-        self.status = f"{len(self.filtered)}/{len(self.sessions)} sessions"
+        self.status = ""
 
     def apply_filter(self) -> None:
         items = self.sessions
@@ -595,102 +662,121 @@ class HistoryTUI:
             return None
         return self.filtered[self.cursor]
 
+    def row_geometry(self) -> tuple[int, int, int]:
+        """Return (body_top, body_h, list_width)."""
+        height, width = self.stdscr.getmaxyx()
+        body_top = 1
+        body_h = max(1, height - body_top - 1)
+        # Small rows: title column stays compact; leftover width is the hover card.
+        list_width = 8 if width < 22 else min(26, max(16, width // 3))
+        return body_top, body_h, list_width
+
     def draw(self) -> None:
         stdscr = self.stdscr
         stdscr.erase()
         height, width = stdscr.getmaxyx()
-        list_width = max(28, min(46, width // 2))
-        if width < 60:
-            list_width = max(18, width - 2)
-        preview_width = max(0, width - list_width - 1)
+        body_top, body_h, list_width = self.row_geometry()
+        self.body_top = body_top
         now = time.time()
-        header = "Sessions  cwd" if self.cwd_only else "Sessions  all"
         if self.searching:
             header = f"/{self.query}▌"
-        stdscr.addstr(0, 0, clip(header, width), curses.A_BOLD)
-        path = clip(self.cwd or "(no cwd)", width)
-        if height > 2:
-            stdscr.addstr(1, 0, path, curses.A_DIM)
+        else:
+            header = ""
+        if header:
+            safe_add(stdscr, 0, 0, header, curses.A_DIM)
 
-        body_top = 2
-        body_bottom = height - 2
-        body_h = max(1, body_bottom - body_top)
         if self.cursor < self.scroll:
             self.scroll = self.cursor
         if self.cursor >= self.scroll + body_h:
             self.scroll = self.cursor - body_h + 1
 
         visible = self.filtered[self.scroll : self.scroll + body_h]
-        if not visible:
-            stdscr.addstr(body_top, 0, clip("No sessions for this filter.", list_width))
+        selected_row = None
         for offset, session in enumerate(visible):
             row = body_top + offset
             selected = (self.scroll + offset) == self.cursor
-            mark = "●" if session.live_pane else " "
-            line = (
-                f"{mark}{LABEL.get(session.provider, session.provider):<4} "
-                f"{rel_time(session.updated_at, now):>4}  {session.title or '(untitled)'}"
-            )
-            attr = curses.A_REVERSE if selected else curses.A_NORMAL
-            try:
-                stdscr.addstr(row, 0, pad(line, list_width), attr)
-            except curses.error:
-                pass
+            if selected:
+                selected_row = row
+            title = session.title or "(untitled)"
+            if selected:
+                tick = "━━━━" if session.live_pane else "━━━"
+                attr = curses.A_BOLD
+            else:
+                tick = "  ● " if session.live_pane else "  ─ "
+                attr = curses.A_DIM
+            if width < 18:
+                line = tick
+            else:
+                line = f"{tick} {title}"
+            safe_add(stdscr, row, 0, pad(line, list_width), attr)
 
-        if preview_width >= 16:
-            session = self.current()
-            preview_lines = self.preview_lines(session, body_h, preview_width)
-            for offset, line in enumerate(preview_lines):
-                try:
-                    stdscr.addnstr(body_top + offset, list_width + 1, line, preview_width)
-                except curses.error:
-                    pass
-            for row in range(body_top, body_bottom):
-                try:
-                    stdscr.addch(row, list_width, curses.ACS_VLINE)
-                except curses.error:
-                    pass
+        session = self.current()
+        card_x = list_width + 1
+        if session and selected_row is not None and width - card_x >= 18:
+            self.draw_card(session, selected_row, card_x, width - card_x, height - 1, now)
 
-        footer = "↑↓ move  enter resume  / search  a all/cwd  r refresh  q close"
-        if self.status:
-            footer = clip(self.status, width - 1) + "  |  " + footer
-        try:
-            stdscr.addstr(height - 1, 0, clip(footer, width - 1), curses.A_DIM)
-        except curses.error:
-            pass
+        footer = self.status or "click jump  / search  a all  q"
+        safe_add(stdscr, height - 1, 0, footer, curses.A_DIM)
         stdscr.refresh()
 
-    def preview_lines(self, session: Session | None, height: int, width: int) -> list[str]:
-        if session is None:
-            return ["Select a session."]
-        lines = [
-            f"{session.provider}  {session.session_id}",
-            session.cwd or "(cwd unknown)",
-            f"{'LIVE ' + session.live_pane if session.live_pane else 'saved'}  "
-            f"{datetime.fromtimestamp(session.updated_at).strftime('%Y-%m-%d %H:%M') if session.updated_at else ''}",
-            "",
-        ]
-        body = session.preview.strip() or "(no preview)"
-        for raw in body.splitlines():
-            text = raw.rstrip()
+    def draw_card(
+        self,
+        session: Session,
+        row: int,
+        x: int,
+        max_width: int,
+        max_bottom: int,
+        now: float,
+    ) -> None:
+        inner_w = min(42, max(16, max_width - 2))
+        snippets = self.card_snippets(session, inner_w)
+        # 4 preview bars like the screenshot, plus a title line.
+        lines = [clip(session.title or "(untitled)", inner_w)] + snippets[:4]
+        box_h = len(lines) + 2
+        box_w = inner_w + 2
+        top = row - 1
+        if top < 0:
+            top = 0
+        if top + box_h > max_bottom:
+            top = max(0, max_bottom - box_h)
+        attr = curses.A_DIM
+        safe_add(self.stdscr, top, x, "╭" + ("─" * inner_w) + "╮", attr)
+        for index, line in enumerate(lines):
+            # Vary bar length so it reads as a chat card, not a table.
+            if index == 0:
+                content = pad(line, inner_w)
+                line_attr = curses.A_BOLD
+            else:
+                bar_w = max(8, inner_w - (index % 3) * 6)
+                content = pad(clip(line, bar_w), inner_w)
+                line_attr = curses.A_DIM
+            safe_add(self.stdscr, top + 1 + index, x, "│" + content + "│", line_attr)
+        safe_add(self.stdscr, top + box_h - 1, x, "╰" + ("─" * inner_w) + "╯", attr)
+        meta = f"{session.provider}  {rel_time(session.updated_at, now)}"
+        if session.live_pane:
+            meta += "  live"
+        if top + box_h < max_bottom:
+            safe_add(self.stdscr, top + box_h, x + 1, meta, curses.A_DIM)
+
+    def card_snippets(self, session: Session, width: int) -> list[str]:
+        parts: list[str] = []
+        for raw in (session.preview or "").splitlines():
+            text = " ".join(raw.split())
             if not text:
-                lines.append("")
                 continue
-            while display_width(text) > width:
-                chunk = clip(text, width)
-                lines.append(chunk)
-                text = text[len(chunk) :].lstrip()
-            lines.append(text)
-            if len(lines) >= height:
+            parts.append(clip(text, width))
+            if len(parts) >= 4:
                 break
-        return lines[:height]
+        if not parts:
+            parts = [clip(session.cwd or "empty session", width)]
+        return parts
 
     def resume(self) -> None:
         session = self.current()
         if session is None:
             self.status = "nothing selected"
             return
-        self.status = f"resuming {session.provider}…"
+        self.status = "opening…"
         self.draw()
         try:
             self.status = resume_session(session, self.target)
@@ -699,65 +785,89 @@ class HistoryTUI:
         except Exception as exc:  # noqa: BLE001
             self.status = str(exc).splitlines()[0][:120]
 
+    def index_at(self, y: int) -> int | None:
+        body_top, body_h, _ = self.row_geometry()
+        if y < body_top or y >= body_top + body_h:
+            return None
+        index = self.scroll + (y - body_top)
+        if 0 <= index < len(self.filtered):
+            return index
+        return None
+
     def run(self) -> None:
         curses.curs_set(0)
         curses.use_default_colors()
         self.stdscr.nodelay(False)
         self.stdscr.keypad(True)
-        curses.mousemask(curses.ALL_MOUSE_EVENTS)
-        while True:
-            self.draw()
-            key = self.stdscr.getch()
-            if self.searching:
-                if key in (27,):
-                    self.searching = False
-                    self.query = ""
-                    self.apply_filter()
-                elif key in (curses.KEY_BACKSPACE, 127, 8):
-                    self.query = self.query[:-1]
-                    self.apply_filter()
-                elif key in (10, 13):
-                    self.searching = False
-                elif 32 <= key <= 126:
-                    self.query += chr(key)
-                    self.apply_filter()
-                continue
-            if key in (ord("q"), 27):
-                return
-            if key in (curses.KEY_UP, ord("k")):
-                self.cursor = max(0, self.cursor - 1)
-            elif key in (curses.KEY_DOWN, ord("j")):
-                self.cursor = min(max(0, len(self.filtered) - 1), self.cursor + 1)
-            elif key == curses.KEY_PPAGE:
-                self.cursor = max(0, self.cursor - 10)
-            elif key == curses.KEY_NPAGE:
-                self.cursor = min(max(0, len(self.filtered) - 1), self.cursor + 10)
-            elif key in (10, 13):
-                self.resume()
-            elif key == ord("/"):
-                self.searching = True
-                self.query = ""
-            elif key == ord("a"):
-                self.cwd_only = not self.cwd_only
-                self.apply_filter()
-                self.status = "this workspace" if self.cwd_only else "all workspaces"
-            elif key == ord("r"):
-                self.reload()
-            elif key == curses.KEY_MOUSE:
-                try:
-                    _, x, y, _, bstate = curses.getmouse()
-                except curses.error:
+        curses.mousemask(curses.ALL_MOUSE_EVENTS | getattr(curses, "REPORT_MOUSE_POSITION", 0))
+        try:
+            curses.putp("\033[?1003h")
+        except curses.error:
+            pass
+        try:
+            while True:
+                self.draw()
+                key = self.stdscr.getch()
+                if self.searching:
+                    if key in (27,):
+                        self.searching = False
+                        self.query = ""
+                        self.apply_filter()
+                    elif key in (curses.KEY_BACKSPACE, 127, 8):
+                        self.query = self.query[:-1]
+                        self.apply_filter()
+                    elif key in (10, 13):
+                        self.searching = False
+                    elif 32 <= key <= 126:
+                        self.query += chr(key)
+                        self.apply_filter()
                     continue
-                height, width = self.stdscr.getmaxyx()
-                list_width = max(28, min(46, width // 2))
-                if y >= 2 and y < height - 1 and x < list_width:
-                    index = self.scroll + (y - 2)
-                    if 0 <= index < len(self.filtered):
-                        self.cursor = index
-                        if bstate & curses.BUTTON1_DOUBLE_CLICKED:
-                            self.resume()
-            elif key == curses.KEY_RESIZE:
-                continue
+                if key in (ord("q"), 27):
+                    return
+                if key in (curses.KEY_UP, ord("k")):
+                    self.cursor = max(0, self.cursor - 1)
+                elif key in (curses.KEY_DOWN, ord("j")):
+                    self.cursor = min(max(0, len(self.filtered) - 1), self.cursor + 1)
+                elif key == curses.KEY_PPAGE:
+                    self.cursor = max(0, self.cursor - 10)
+                elif key == curses.KEY_NPAGE:
+                    self.cursor = min(max(0, len(self.filtered) - 1), self.cursor + 10)
+                elif key in (10, 13):
+                    self.resume()
+                elif key == ord("/"):
+                    self.searching = True
+                    self.query = ""
+                elif key == ord("a"):
+                    self.cwd_only = not self.cwd_only
+                    self.apply_filter()
+                elif key == ord("r"):
+                    self.reload()
+                elif key == curses.KEY_MOUSE:
+                    try:
+                        _, _x, y, _, bstate = curses.getmouse()
+                    except curses.error:
+                        continue
+                    index = self.index_at(y)
+                    if index is None:
+                        continue
+                    self.cursor = index
+                    clicked = bool(
+                        bstate
+                        & (
+                            curses.BUTTON1_CLICKED
+                            | curses.BUTTON1_PRESSED
+                            | curses.BUTTON1_DOUBLE_CLICKED
+                        )
+                    )
+                    if clicked:
+                        self.resume()
+                elif key == curses.KEY_RESIZE:
+                    continue
+        finally:
+            try:
+                curses.putp("\033[?1003l")
+            except curses.error:
+                pass
 
 
 def cmd_list(show_all: bool) -> int:

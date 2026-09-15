@@ -1,6 +1,6 @@
 # Herdr Session History
 
-Codex-style session list for Herdr. Opens as a right-hand pane: past conversations on the left of that pane, preview on the right. Enter resumes the selected session.
+Compact session rail for Herdr, in the Codex / ChatGPT history style: one small row per conversation, a hover card with a preview, click to jump to that session.
 
 Supports **Grok**, **Claude Code**, **Codex**, and **Agy**.
 
@@ -16,8 +16,8 @@ herdr plugin action invoke herdr-session-history.open
 
 | Key | Action |
 | --- | --- |
-| `↑` `↓` / `j` `k` | Move |
-| `enter` | Resume (focus if already live, otherwise split and `--resume`) |
+| `↑` `↓` / hover | Select a row (preview card pops out) |
+| click / `enter` | Jump to that conversation (focus if live, otherwise `--resume`) |
 | `/` | Search title / preview / cwd |
 | `a` | Toggle this workspace vs all |
 | `r` | Reload |
