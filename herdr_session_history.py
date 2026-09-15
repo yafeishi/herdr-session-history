@@ -89,7 +89,7 @@ def invoker_pane() -> str:
     if env:
         return env
     ctx = context_json()
-    for key in ("pane_id", "focused_pane_id"):
+    for key in ("focused_pane_id", "pane_id"):
         value = ctx.get(key)
         if isinstance(value, str) and value:
             return value
@@ -102,6 +102,10 @@ def workspace_cwd() -> str:
     if env:
         return str(Path(env).expanduser())
     ctx = context_json()
+    for key in ("workspace_cwd", "focused_pane_cwd"):
+        value = ctx.get(key)
+        if isinstance(value, str) and value:
+            return str(Path(value).expanduser())
     ws = ctx.get("workspace") or {}
     for key in ("identity_cwd", "cwd", "path"):
         if isinstance(ws, dict) and isinstance(ws.get(key), str) and ws[key]:
@@ -136,6 +140,12 @@ def clip(text: str, width: int) -> str:
         out.append(char)
         used += size
     return "".join(out)
+
+
+def pad(text: str, width: int) -> str:
+    text = clip(text, width)
+    extra = width - display_width(text)
+    return text + (" " * max(0, extra))
 
 
 def rel_time(ts: float, now: float | None = None) -> str:
@@ -623,7 +633,7 @@ class HistoryTUI:
             )
             attr = curses.A_REVERSE if selected else curses.A_NORMAL
             try:
-                stdscr.addstr(row, 0, clip(line, list_width).ljust(list_width), attr)
+                stdscr.addstr(row, 0, pad(line, list_width), attr)
             except curses.error:
                 pass
 
