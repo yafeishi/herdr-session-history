@@ -77,6 +77,22 @@ def pick_id(obj: Any, *keys: str) -> str:
     return ""
 
 
+def sibling_agent_pane(history_pane: str) -> str:
+    if not history_pane:
+        return ""
+    layout = layout_info(history_pane)
+    panes = layout.get("panes") if isinstance(layout, dict) else None
+    if not isinstance(panes, list):
+        return ""
+    for item in panes:
+        pane_id = str(item.get("pane_id") or "")
+        if pane_id and pane_id != history_pane:
+            record = pane_record(pane_id)
+            if record.get("agent"):
+                return pane_id
+    return ""
+
+
 def invoker_pane() -> str:
     env = os.environ.get("HERDR_SESSION_HISTORY_TARGET") or ""
     if env:
@@ -85,7 +101,13 @@ def invoker_pane() -> str:
     for key in ("focused_pane_id", "pane_id"):
         value = ctx.get(key)
         if isinstance(value, str) and value:
-            return value
+            record = pane_record(value)
+            if record.get("agent"):
+                return value
+    me = os.environ.get("HERDR_PANE_ID") or ""
+    sibling = sibling_agent_pane(me)
+    if sibling:
+        return sibling
     pane = ctx.get("pane") or ctx.get("focused_pane") or {}
     return pick_id(pane, "pane_id", "id")
 
