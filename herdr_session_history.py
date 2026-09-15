@@ -576,29 +576,8 @@ def dock_as_left_rail(history_pane: str, conversation_pane: str) -> None:
             herdr("pane", "swap", "--source-pane", history_pane, "--target-pane", conversation_pane)
         except RuntimeError:
             return
-        layout = layout_info(history_pane)
-        panes = layout.get("panes") if isinstance(layout, dict) else []
-        mine = next((item for item in panes if item.get("pane_id") == history_pane), mine)
-    width = int((mine.get("rect") or {}).get("width") or 0)
-    if width <= 32:
-        return
-    # Grow the conversation pane leftward so the rail stays a thin column.
-    try:
-        herdr(
-            "pane",
-            "resize",
-            "--pane",
-            conversation_pane,
-            "--direction",
-            "left",
-            "--amount",
-            str(max(8, width - 28)),
-        )
-    except RuntimeError:
-        try:
-            herdr("pane", "resize", "--pane", conversation_pane, "--direction", "left", "--amount", "0.25")
-        except RuntimeError:
-            pass
+    # Leave width alone. The TUI draws a thin tick rail + hover card inside
+    # whatever column the user keeps; auto-resize fights nested splits.
 
 
 # --- TUI ----------------------------------------------------------------------
@@ -629,7 +608,6 @@ class HistoryTUI:
         self.sessions: list[Session] = []
         self.filtered: list[Session] = []
         self.reload()
-        dock_as_left_rail(os.environ.get("HERDR_PANE_ID") or "", self.target)
 
     def reload(self) -> None:
         self.sessions = load_sessions()
@@ -799,11 +777,8 @@ class HistoryTUI:
         curses.use_default_colors()
         self.stdscr.nodelay(False)
         self.stdscr.keypad(True)
-        curses.mousemask(curses.ALL_MOUSE_EVENTS | getattr(curses, "REPORT_MOUSE_POSITION", 0))
-        try:
-            curses.putp("\033[?1003h")
-        except curses.error:
-            pass
+        # Click only. Motion reports jump the cursor to the pointer on open.
+        curses.mousemask(curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED | curses.BUTTON1_DOUBLE_CLICKED)
         try:
             while True:
                 self.draw()
@@ -864,10 +839,7 @@ class HistoryTUI:
                 elif key == curses.KEY_RESIZE:
                     continue
         finally:
-            try:
-                curses.putp("\033[?1003l")
-            except curses.error:
-                pass
+            pass
 
 
 def cmd_list(show_all: bool) -> int:
@@ -921,7 +893,7 @@ def cmd_open() -> int:
                 return 0
             except RuntimeError:
                 stored.unlink(missing_ok=True)
-    herdr(
+    opened = herdr(
         "plugin",
         "pane",
         "open",
@@ -936,6 +908,14 @@ def cmd_open() -> int:
         "--focus",
         *env_args,
     )
+    hist = ""
+    if isinstance(opened, dict):
+        hist = pick_id((opened.get("plugin_pane") or {}).get("pane") or {}, "pane_id", "id")
+    if hist:
+        remember = state_pane_file()
+        if remember:
+            remember.write_text(hist)
+        dock_as_left_rail(hist, pane)
     return 0
 
 
