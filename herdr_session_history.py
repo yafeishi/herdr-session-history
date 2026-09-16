@@ -212,6 +212,30 @@ def layout_for(height: int, width: int, searching: bool) -> Layout:
     )
 
 
+def click_index(y: int, body_top: int, body_h: int, scroll: int, count: int) -> int | None:
+    """Map a click row to a filtered-turn index. Footer / header clicks are ignored."""
+    if count <= 0 or body_h <= 0:
+        return None
+    if y < body_top or y >= body_top + body_h:
+        return None
+    index = scroll + (y - body_top)
+    if 0 <= index < count:
+        return index
+    return None
+
+
+def parse_binding(text: str) -> tuple[str, str]:
+    raw = (text or "").strip()
+    hist, sep, bound = raw.partition("\t")
+    if sep:
+        return hist.strip(), bound.strip()
+    return raw, ""
+
+
+def format_binding(history_pane: str, target_pane: str) -> str:
+    return f"{history_pane}\t{target_pane}"
+
+
 def row_label(title: str, selected: bool, current: bool, width: int) -> str:
     title = title or "(untitled)"
     if width <= 0:
@@ -426,6 +450,9 @@ def pane_session_id(pane_id: str) -> str:
     return str(session.get("value") or "")
 
 
+JUMP_KEY_PAUSE = 0.02
+
+
 def send_keys(pane_id: str, *keys: str) -> None:
     if not keys:
         return
@@ -435,25 +462,62 @@ def send_keys(pane_id: str, *keys: str) -> None:
         herdr("pane", "send-keys", pane_id, *keys)
 
 
-def jump_scrollback(pane_id: str, from_index: int, to_index: int, primed: bool) -> bool:
-    """Move Grok/Claude scrollback from one user-turn to another. Returns primed."""
-    record = pane_record(pane_id)
-    status = str(record.get("agent_status") or "")
-    if status == "working":
-        raise RuntimeError("wait — this pane is still answering")
-    kind = str(record.get("agent") or "").lower()
+def send_keys_paced(pane_id: str, keys: list[str] | tuple[str, ...], pause: float | None = None) -> None:
+    delay = JUMP_KEY_PAUSE if pause is None else pause
+    for i, key in enumerate(keys):
+        send_keys(pane_id, key)
+        if delay and i + 1 < len(keys):
+            time.sleep(delay)
+
+
+@dataclass(frozen=True)
+class ScrollJump:
+    keys: tuple[str, ...]
+    primed: bool
+    skip_reason: str = ""
+
+
+def plan_scroll_jump(
+    *,
+    kind: str,
+    status: str,
+    to_index: int,
+    turn_count: int,
+    primed: bool,
+) -> ScrollJump:
+    """Absolute turn jump. Relative Shift+Left/Right desyncs after focus/scroll."""
+    kind = str(kind or "").lower()
+    if kind in ("antigravity", "antigravity-cli"):
+        kind = "agy"
     if kind not in ("grok", "claude", "claude-code", "codex"):
-        raise RuntimeError(f"no scroll jump for {kind or 'this agent'}")
-    if not primed:
-        send_keys(pane_id, "tab")
-        time.sleep(0.08)
-        primed = True
-    delta = to_index - from_index
-    if delta == 0:
-        return primed
-    key = "shift+right" if delta > 0 else "shift+left"
-    send_keys(pane_id, *([key] * abs(delta)))
-    return primed
+        return ScrollJump((), primed, f"no scroll jump for {kind or 'this agent'}")
+    if turn_count <= 0:
+        return ScrollJump((), primed, "no turns")
+    to_index = max(0, min(int(to_index), turn_count - 1))
+    keys: list[str] = []
+    next_primed = True
+    # Working Grok already parks the keyboard in scrollback. Tab would leave it.
+    if status != "working" and not primed:
+        keys.append("tab")
+    keys.extend(["shift+right"] * turn_count)
+    keys.extend(["shift+left"] * ((turn_count - 1) - to_index))
+    return ScrollJump(tuple(keys), next_primed)
+
+
+def jump_scrollback(pane_id: str, to_index: int, turn_count: int, primed: bool) -> bool:
+    """Move Grok/Claude scrollback to a user-turn. Returns primed."""
+    record = pane_record(pane_id)
+    plan = plan_scroll_jump(
+        kind=str(record.get("agent") or ""),
+        status=str(record.get("agent_status") or ""),
+        to_index=to_index,
+        turn_count=turn_count,
+        primed=primed,
+    )
+    if plan.skip_reason:
+        raise RuntimeError(plan.skip_reason)
+    send_keys_paced(pane_id, plan.keys)
+    return plan.primed
 
 
 def layout_info(pane_id: str) -> dict[str, Any]:
@@ -682,14 +746,7 @@ class HistoryTUI:
 
     def index_at(self, y: int) -> int | None:
         geo = self.row_geometry()
-        if geo.body_h <= 0:
-            return self.cursor if self.filtered else None
-        if y < geo.body_top or y >= geo.body_top + geo.body_h:
-            return None
-        index = self.scroll + (y - geo.body_top)
-        if 0 <= index < len(self.filtered):
-            return index
-        return None
+        return click_index(y, geo.body_top, geo.body_h, self.scroll, len(self.filtered))
 
     def jump_here(self) -> None:
         turn = self.current()
@@ -698,8 +755,8 @@ class HistoryTUI:
         try:
             self.scrollback_primed = jump_scrollback(
                 self.target,
-                self.viewed_index,
                 turn.index,
+                len(self.turns),
                 self.scrollback_primed,
             )
             self.viewed_index = turn.index
@@ -799,7 +856,7 @@ def remember_pane() -> None:
     pane = os.environ.get("HERDR_PANE_ID") or ""
     target = os.environ.get("HERDR_SESSION_HISTORY_TARGET") or ""
     if path and pane:
-        path.write_text(f"{pane}\t{target}")
+        path.write_text(format_binding(pane, target))
 
 
 def cmd_open() -> int:
@@ -815,7 +872,7 @@ def cmd_open() -> int:
         env_args.extend(["--env", f"HERDR_SESSION_HISTORY_CWD={cwd}"])
     stored = state_pane_file()
     if stored and stored.is_file():
-        existing, _, bound = stored.read_text().strip().partition("\t")
+        existing, bound = parse_binding(stored.read_text())
         if existing and bound == pane:
             try:
                 herdr("plugin", "pane", "focus", existing)
@@ -844,7 +901,7 @@ def cmd_open() -> int:
     if hist:
         remember = state_pane_file()
         if remember:
-            remember.write_text(f"{hist}\t{pane}")
+            remember.write_text(format_binding(hist, pane))
         dock_as_left_rail(hist, pane)
     return 0
 
