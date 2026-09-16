@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import curses
 import json
+import locale
 import os
 import re
 import subprocess
@@ -192,13 +193,14 @@ def layout_for(height: int, width: int, searching: bool) -> Layout:
     body_top = 1 if searching and height >= 2 else 0
     show_footer = (height - body_top) >= 3
     body_h = max(0, height - body_top - (1 if show_footer else 0))
-    if width >= 40:
-        list_width = min(26, max(16, width // 3))
-        show_card = (width - list_width - 1) >= 18
+    usable = max(0, width - 1)
+    if usable >= 40:
+        list_width = min(26, max(16, usable // 3))
+        show_card = (usable - list_width - 1) >= 18
         if not show_card:
-            list_width = width
+            list_width = usable
     else:
-        list_width = width
+        list_width = usable
         show_card = False
     return Layout(
         body_top=body_top,
@@ -227,27 +229,15 @@ def row_label(title: str, selected: bool, current: bool, width: int) -> str:
 
 
 def sync_curses_size(stdscr: curses.window) -> tuple[int, int]:
+    """Follow the pane pty. Do not force resizeterm — that desyncs curses in Herdr splits."""
     try:
         curses.update_lines_cols()
     except Exception:
         pass
     try:
-        cols, rows = os.get_terminal_size()
-    except OSError:
-        cols, rows = 0, 0
-    if rows > 0 and cols > 0:
-        try:
-            curses.resizeterm(rows, cols)
-        except curses.error:
-            pass
-        try:
-            stdscr.resize(rows, cols)
-        except curses.error:
-            pass
-    try:
         height, width = stdscr.getmaxyx()
     except curses.error:
-        return max(0, rows), max(0, cols)
+        height, width = 0, 0
     return max(0, height), max(0, width)
 
 
@@ -509,11 +499,18 @@ def safe_add(stdscr: curses.window, y: int, x: int, text: str, attr: int = 0) ->
         return
     if height <= 0 or width <= 0 or y < 0 or y >= height or x >= width or x < 0:
         return
-    limit = width - x
-    if y == height - 1:
-        limit = max(0, limit - 1)
+    # Never write the last column: ncurses errors on the bottom-right cell,
+    # and a full-width addstr is dropped entirely in a Herdr split.
+    limit = max(0, width - x - 1)
+    clipped = clip(text, limit)
     try:
-        stdscr.addstr(y, x, clip(text, limit), attr)
+        stdscr.addstr(y, x, clipped, attr)
+        return
+    except curses.error:
+        pass
+    try:
+        fallback = clipped.encode("ascii", "replace").decode("ascii")
+        stdscr.addstr(y, x, fallback, attr)
     except curses.error:
         pass
 
@@ -773,6 +770,11 @@ class HistoryTUI:
                     self.cursor = index
                     self.jump_here()
             elif key == curses.KEY_RESIZE:
+                try:
+                    self.stdscr.erase()
+                    self.stdscr.redrawwin()
+                except curses.error:
+                    pass
                 continue
 
 
@@ -832,6 +834,7 @@ def cmd_open() -> int:
         "split",
         "--direction",
         "right",
+        *(["--target-pane", pane] if pane else []),
         "--focus",
         *env_args,
     )
@@ -848,6 +851,10 @@ def cmd_open() -> int:
 
 def cmd_tui() -> int:
     remember_pane()
+    try:
+        locale.setlocale(locale.LC_ALL, "")
+    except locale.Error:
+        pass
     try:
         curses.wrapper(lambda stdscr: HistoryTUI(stdscr).run())
     except (KeyboardInterrupt, curses.error):
