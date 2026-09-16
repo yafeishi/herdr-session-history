@@ -175,6 +175,82 @@ def pad(text: str, width: int) -> str:
     return text + (" " * max(0, extra))
 
 
+@dataclass
+class Layout:
+    body_top: int
+    body_h: int
+    list_width: int
+    show_footer: bool
+    show_card: bool
+    card_x: int
+
+
+def layout_for(height: int, width: int, searching: bool) -> Layout:
+    """Fit the rail into a compressed pane: keep titles, drop chrome first."""
+    height = max(0, int(height))
+    width = max(0, int(width))
+    body_top = 1 if searching and height >= 2 else 0
+    show_footer = (height - body_top) >= 3
+    body_h = max(0, height - body_top - (1 if show_footer else 0))
+    if width >= 40:
+        list_width = min(26, max(16, width // 3))
+        show_card = (width - list_width - 1) >= 18
+        if not show_card:
+            list_width = width
+    else:
+        list_width = width
+        show_card = False
+    return Layout(
+        body_top=body_top,
+        body_h=body_h,
+        list_width=list_width,
+        show_footer=show_footer,
+        show_card=show_card,
+        card_x=list_width + 1,
+    )
+
+
+def row_label(title: str, selected: bool, current: bool, width: int) -> str:
+    title = title or "(untitled)"
+    if width <= 0:
+        return ""
+    if width >= 18:
+        if selected:
+            mark = "━━━━" if current else "━━━"
+        else:
+            mark = "  ● " if current else "  ─ "
+        return pad(f"{mark} {title}", width)
+    mark = ("━" if current else "─") if selected else ("●" if current else "·")
+    if width <= 2:
+        return pad(mark, width)
+    return pad(f"{mark} {title}", width)
+
+
+def sync_curses_size(stdscr: curses.window) -> tuple[int, int]:
+    try:
+        curses.update_lines_cols()
+    except Exception:
+        pass
+    try:
+        cols, rows = os.get_terminal_size()
+    except OSError:
+        cols, rows = 0, 0
+    if rows > 0 and cols > 0:
+        try:
+            curses.resizeterm(rows, cols)
+        except curses.error:
+            pass
+        try:
+            stdscr.resize(rows, cols)
+        except curses.error:
+            pass
+    try:
+        height, width = stdscr.getmaxyx()
+    except curses.error:
+        return max(0, rows), max(0, cols)
+    return max(0, height), max(0, width)
+
+
 def content_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -427,11 +503,17 @@ def dock_as_left_rail(history_pane: str, conversation_pane: str) -> None:
 
 
 def safe_add(stdscr: curses.window, y: int, x: int, text: str, attr: int = 0) -> None:
-    height, width = stdscr.getmaxyx()
-    if y < 0 or y >= height or x >= width or x < 0:
-        return
     try:
-        stdscr.addstr(y, x, clip(text, width - x), attr)
+        height, width = stdscr.getmaxyx()
+    except curses.error:
+        return
+    if height <= 0 or width <= 0 or y < 0 or y >= height or x >= width or x < 0:
+        return
+    limit = width - x
+    if y == height - 1:
+        limit = max(0, limit - 1)
+    try:
+        stdscr.addstr(y, x, clip(text, limit), attr)
     except curses.error:
         pass
 
@@ -483,63 +565,75 @@ class HistoryTUI:
             return None
         return self.filtered[self.cursor]
 
-    def row_geometry(self) -> tuple[int, int, int]:
-        """Return (body_top, body_h, list_width)."""
-        height, width = self.stdscr.getmaxyx()
-        body_top = 1
-        body_h = max(1, height - body_top - 1)
-        # Small rows: title column stays compact; leftover width is the hover card.
-        list_width = 8 if width < 22 else min(26, max(16, width // 3))
-        return body_top, body_h, list_width
+    def row_geometry(self) -> Layout:
+        height, width = sync_curses_size(self.stdscr)
+        return layout_for(height, width, self.searching)
 
     def draw(self) -> None:
         stdscr = self.stdscr
-        stdscr.erase()
-        height, width = stdscr.getmaxyx()
-        body_top, body_h, list_width = self.row_geometry()
-        self.body_top = body_top
+        height, width = sync_curses_size(stdscr)
+        if height <= 0 or width <= 0:
+            return
+        try:
+            stdscr.erase()
+        except curses.error:
+            return
+        geo = layout_for(height, width, self.searching)
+        self.body_top = geo.body_top
         if self.searching:
-            header = f"/{self.query}▌"
-        else:
-            header = ""
-        if header:
-            safe_add(stdscr, 0, 0, header, curses.A_DIM)
+            safe_add(stdscr, 0, 0, f"/{self.query}▌", curses.A_DIM)
+
+        if geo.body_h <= 0:
+            turn = self.current()
+            if turn:
+                safe_add(
+                    stdscr,
+                    0,
+                    0,
+                    row_label(turn.title, True, turn.current, width),
+                    curses.A_BOLD,
+                )
+            try:
+                stdscr.refresh()
+            except curses.error:
+                pass
+            return
 
         if self.cursor < self.scroll:
             self.scroll = self.cursor
-        if self.cursor >= self.scroll + body_h:
-            self.scroll = self.cursor - body_h + 1
+        if self.cursor >= self.scroll + geo.body_h:
+            self.scroll = self.cursor - geo.body_h + 1
 
-        visible = self.filtered[self.scroll : self.scroll + body_h]
+        visible = self.filtered[self.scroll : self.scroll + geo.body_h]
         selected_row = None
         if not visible:
-            safe_add(stdscr, body_top, 0, "no turns in this pane", curses.A_DIM)
+            safe_add(stdscr, geo.body_top, 0, "no turns in this pane", curses.A_DIM)
         for offset, turn in enumerate(visible):
-            row = body_top + offset
+            row = geo.body_top + offset
             selected = (self.scroll + offset) == self.cursor
             if selected:
                 selected_row = row
-            title = turn.title or "(untitled)"
-            if selected:
-                tick = "━━━━" if turn.current else "━━━"
-                attr = curses.A_BOLD
-            else:
-                tick = "  ● " if turn.current else "  ─ "
-                attr = curses.A_DIM
-            if width < 18:
-                line = tick
-            else:
-                line = f"{tick} {title}"
-            safe_add(stdscr, row, 0, pad(line, list_width), attr)
+            attr = curses.A_BOLD if selected else curses.A_DIM
+            safe_add(
+                stdscr,
+                row,
+                0,
+                row_label(turn.title, selected, turn.current, geo.list_width),
+                attr,
+            )
 
         turn = self.current()
-        card_x = list_width + 1
-        if turn and selected_row is not None and width - card_x >= 18:
-            self.draw_card(turn, selected_row, card_x, width - card_x, height - 1)
+        if geo.show_card and turn and selected_row is not None:
+            card_bottom = height - (1 if geo.show_footer else 0)
+            self.draw_card(turn, selected_row, geo.card_x, width - geo.card_x, card_bottom)
 
-        footer = self.status or "↑↓ jump in chat  / search  q"
-        safe_add(stdscr, height - 1, 0, footer, curses.A_DIM)
-        stdscr.refresh()
+        if geo.show_footer:
+            footer = self.status or "↑↓ jump in chat  / search  q"
+            safe_add(stdscr, height - 1, 0, footer, curses.A_DIM)
+        try:
+            stdscr.refresh()
+        except curses.error:
+            pass
 
     def draw_card(
         self,
@@ -590,10 +684,12 @@ class HistoryTUI:
         return parts
 
     def index_at(self, y: int) -> int | None:
-        body_top, body_h, _ = self.row_geometry()
-        if y < body_top or y >= body_top + body_h:
+        geo = self.row_geometry()
+        if geo.body_h <= 0:
+            return self.cursor if self.filtered else None
+        if y < geo.body_top or y >= geo.body_top + geo.body_h:
             return None
-        index = self.scroll + (y - body_top)
+        index = self.scroll + (y - geo.body_top)
         if 0 <= index < len(self.filtered):
             return index
         return None
@@ -621,8 +717,12 @@ class HistoryTUI:
         self.stdscr.keypad(True)
         curses.mousemask(curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED)
         while True:
-            self.draw()
-            key = self.stdscr.getch()
+            try:
+                self.draw()
+                key = self.stdscr.getch()
+            except curses.error:
+                time.sleep(0.05)
+                continue
             if key == -1:
                 _turns, mtime = load_turns_for_pane(self.target)
                 if mtime != self.source_mtime:
@@ -750,7 +850,7 @@ def cmd_tui() -> int:
     remember_pane()
     try:
         curses.wrapper(lambda stdscr: HistoryTUI(stdscr).run())
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, curses.error):
         return 0
     finally:
         stored = state_pane_file()
