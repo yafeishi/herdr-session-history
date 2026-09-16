@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Session rail</title>
+  <style>
+    html, body { margin: 0; background: #0e0f12; }
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      color: #e8e8ea;
+    }
+    .stage {
+      width: 1100px;
+      height: 640px;
+      padding: 36px 40px 28px;
+      box-sizing: border-box;
+    }
+    .caption {
+      font-size: 13px;
+      letter-spacing: 0.04em;
+      color: #9aa0aa;
+      margin-bottom: 14px;
+    }
+    .caption strong { color: #d5d5d8; font-weight: 600; }
+    .frame {
+      height: 530px;
+      background: #16171c;
+      border: 1px solid #2a2c33;
+      border-radius: 12px;
+      display: flex;
+      overflow: hidden;
+      box-shadow: 0 24px 60px rgba(0,0,0,.45);
+    }
+    .sidebar {
+      width: 168px;
+      background: #121318;
+      border-right: 1px solid #2a2c33;
+      padding: 14px 12px;
+      font-size: 12px;
+      color: #8b909a;
+    }
+    .brand { color: #d5d5d8; font-weight: 650; font-size: 13px; margin-bottom: 16px; }
+    .ws { margin-bottom: 14px; }
+    .ws-name { color: #c9cdd3; font-weight: 600; margin-bottom: 6px; }
+    .agent {
+      display: flex; gap: 8px; align-items: center;
+      padding: 6px 8px; border-radius: 6px; background: #1c1e25;
+      color: #e4e4e7;
+    }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: #82d978; }
+    .quota { margin-top: 6px; color: #82d978; font-variant-numeric: tabular-nums; padding-left: 15px; }
+    .rail {
+      width: 250px;
+      background: #14151a;
+      border-right: 1px solid #2a2c33;
+      padding: 12px 10px 10px;
+      position: relative;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12.5px;
+      line-height: 1.55;
+    }
+    .tick {
+      color: #5c616b;
+      white-space: nowrap;
+      overflow: hidden;
+      padding: 1px 4px;
+    }
+    .tick.sel {
+      color: #f4f4f5;
+      font-weight: 650;
+    }
+    .card {
+      position: absolute;
+      left: 300px;
+      top: 228px;
+      width: 340px;
+      background: #1f2128;
+      border: 1px solid #3a3d46;
+      border-radius: 14px;
+      padding: 14px 16px 12px;
+      box-shadow: 0 18px 40px rgba(0,0,0,.45);
+      z-index: 2;
+    }
+    .card h2 {
+      font-size: 13px;
+      margin: 0 0 8px;
+      font-weight: 650;
+      color: #f4f4f5;
+    }
+    .card p {
+      margin: 0 0 6px;
+      font-size: 12px;
+      line-height: 1.45;
+      color: #b7bcc4;
+    }
+    .meta { margin-top: 10px; color: #8b909a; font-size: 11px; }
+    .chat {
+      flex: 1;
+      padding: 18px 22px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.55;
+      color: #c7cbd1;
+      background:
+        linear-gradient(#16171c, #16171c) padding-box;
+    }
+    .turn {
+      border-left: 2px solid #2e313a;
+      padding: 8px 0 8px 12px;
+      margin: 10px 0;
+      color: #8b909a;
+    }
+    .turn.active {
+      border-left-color: #e4b957;
+      color: #ececec;
+      background: rgba(228,185,87,.06);
+      margin-left: -12px;
+      padding-left: 24px;
+    }
+    .who { color: #9aa3b2; font-size: 11px; margin-bottom: 4px; }
+    .prompt { color: #f0f0f2; }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <div class="caption">Herdr · <strong>per-pane history rail</strong> · one small row per turn</div>
+    <div class="frame">
+      <aside class="sidebar">
+        <div class="brand">herdr</div>
+        <div class="ws">
+          <div class="ws-name">1  AICODING</div>
+          <div class="agent"><span class="dot"></span> Grok</div>
+          <div class="quota">7d 96%</div>
+        </div>
+      </aside>
+      <aside class="rail">
+        <div class="tick">─ Does Grok have a 5-hour quota?</div>
+        <div class="tick">─ How do weekly credits reset?</div>
+        <div class="tick">─ Herdr usage best practices</div>
+        <div class="tick">─ What should I change in my setup?</div>
+        <div class="tick">─ Install the Herdr skill for agents</div>
+        <div class="tick">─ How do I actually use the skill?</div>
+        <div class="tick">─ Show pane status, don’t open windows</div>
+        <div class="tick sel">━━━ Per-pane history rail</div>
+        <div class="tick">─ Jump the live TUI to that turn</div>
+        <div class="card">
+          <h2>Per-pane conversation history</h2>
+          <p>Each Herdr pane gets its own turn list.</p>
+          <p>Selecting a row jumps Grok scrollback to that user prompt.</p>
+          <p>No new tab. This rail stays bound to this chat.</p>
+          <div class="meta">#8 / 9 · this chat</div>
+        </div>
+      </aside>
+      <section class="chat">
+        <div class="turn">
+          <div class="who">you</div>
+          Show pane status. Don’t open new windows.
+        </div>
+        <div class="turn active">
+          <div class="who">you</div>
+          <div class="prompt">Only show this pane’s conversation history. Each panel should have its own rail.</div>
+          <div style="margin-top:10px;color:#b7bcc4">
+            Got it — the rail binds to this Grok pane and lists its turns. Up/down jumps the scrollback to that prompt.
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</body>
+</html>

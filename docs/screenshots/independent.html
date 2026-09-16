@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Independent panes</title>
+  <style>
+    html, body { margin: 0; background: #0e0f12; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; color: #e8e8ea; }
+    .stage { width: 1100px; height: 640px; padding: 36px 40px 28px; box-sizing: border-box; }
+    .caption { font-size: 13px; letter-spacing: 0.04em; color: #9aa0aa; margin-bottom: 14px; }
+    .caption strong { color: #d5d5d8; font-weight: 600; }
+    .row { display: flex; gap: 20px; height: 530px; }
+    .col {
+      flex: 1; background: #16171c; border: 1px solid #2a2c33; border-radius: 12px;
+      overflow: hidden; box-shadow: 0 24px 60px rgba(0,0,0,.35); display: flex; flex-direction: column;
+    }
+    .tab {
+      padding: 10px 14px; border-bottom: 1px solid #2a2c33; font-size: 12px; color: #9aa0aa;
+      background: #121318;
+    }
+    .tab b { color: #e8e8ea; }
+    .body { display: flex; flex: 1; min-height: 0; }
+    .rail {
+      width: 42%; background: #14151a; border-right: 1px solid #2a2c33; padding: 12px 10px;
+      font-family: ui-monospace, Menlo, Monaco, Consolas, monospace; font-size: 12px; line-height: 1.55;
+    }
+    .tick { color: #5c616b; padding: 1px 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tick.sel { color: #f4f4f5; font-weight: 650; }
+    .chat {
+      flex: 1; padding: 16px; font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
+      font-size: 12.5px; color: #c7cbd1; line-height: 1.5;
+    }
+    .prompt { color: #f4f4f5; border-left: 2px solid #82d978; padding-left: 10px; }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <div class="caption">Each pane owns <strong>its own history</strong> — another tab does not share this list</div>
+    <div class="row">
+      <div class="col">
+        <div class="tab">tab 1 · <b>AICODING</b> · grok-4.6</div>
+        <div class="body">
+          <aside class="rail">
+            <div class="tick">─ 5-hour quota?</div>
+            <div class="tick sel">━━━ Herdr best practices</div>
+            <div class="tick">─ Install Herdr skill</div>
+            <div class="tick">─ Pane status only</div>
+          </aside>
+          <section class="chat">
+            <div class="prompt">Herdr usage best practices</div>
+            <p style="margin:12px 0 0;color:#9aa0aa">This rail lists turns from this Grok session only.</p>
+          </section>
+        </div>
+      </div>
+      <div class="col">
+        <div class="tab">tab 2 · <b>wecom-keepalive</b> · grok-4.6</div>
+        <div class="body">
+          <aside class="rail">
+            <div class="tick">─ Introduce the project on X</div>
+            <div class="tick sel">━━━ Search GitHub</div>
+            <div class="tick">─ Apple Silicon notes</div>
+          </aside>
+          <section class="chat">
+            <div class="prompt">Search GitHub for tiny-vLLM</div>
+            <p style="margin:12px 0 0;color:#9aa0aa">A different pane, a different session, a different rail.</p>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

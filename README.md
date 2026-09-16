@@ -4,6 +4,26 @@ A compact conversation-history rail for [Herdr](https://herdr.dev). Each agent p
 
 This is a community plugin, not part of Herdr core.
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/rail.png" alt="History rail with a preview card beside the selected turn" width="920" />
+</p>
+
+One small row per turn in the current pane. Selecting a row opens a preview card.
+
+<p align="center">
+  <img src="docs/screenshots/jump.png" alt="Clicking a history row jumps Grok scrollback to that user prompt" width="920" />
+</p>
+
+Click or press up/down: the live Grok pane jumps to that user prompt (`Tab`, then `Shift+Left` / `Shift+Right`).
+
+<p align="center">
+  <img src="docs/screenshots/independent.png" alt="Two Herdr tabs each showing a different session history rail" width="920" />
+</p>
+
+Each pane owns its own history. Another tab does not share the list.
+
 ## Install
 
 Requires **Herdr 0.9+** and **Python 3**.
