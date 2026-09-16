@@ -1,6 +1,6 @@
 id = "herdr-session-history"
 name = "Herdr Session History"
-version = "0.1.3"
+version = "0.1.4"
 min_herdr_version = "0.9.0"
 description = "Per-pane conversation history rail. Lists turns of the current agent session and jumps Grok scrollback to the selected prompt."
 platforms = ["macos", "linux"]

@@ -130,6 +130,37 @@ class PlanScrollJumpTests(unittest.TestCase):
         self.assertEqual(plan.keys.count("shift+right"), 4)
         self.assertEqual(plan.keys.count("shift+left"), 2)
 
+    def test_antigravity_alias_cannot_jump(self) -> None:
+        plan = plan_scroll_jump(
+            kind="antigravity-cli",
+            status="idle",
+            to_index=0,
+            turn_count=2,
+            primed=False,
+        )
+        self.assertIn("no scroll jump", plan.skip_reason)
+
+    def test_codex_keys_are_still_planned(self) -> None:
+        plan = plan_scroll_jump(
+            kind="codex",
+            status="idle",
+            to_index=0,
+            turn_count=2,
+            primed=True,
+        )
+        self.assertEqual(plan.skip_reason, "")
+        self.assertEqual(plan.keys.count("shift+right"), 2)
+
+    def test_blocked_is_not_working_so_tabs_once(self) -> None:
+        plan = plan_scroll_jump(
+            kind="grok",
+            status="blocked",
+            to_index=0,
+            turn_count=2,
+            primed=False,
+        )
+        self.assertEqual(plan.keys[0], "tab")
+
 
 class ClickIndexTests(unittest.TestCase):
     def test_click_maps_to_filtered_row(self) -> None:
@@ -163,6 +194,19 @@ class LayoutTests(unittest.TestCase):
         geo = layout_for(30, 80, False)
         self.assertTrue(geo.show_card)
         self.assertLessEqual(geo.list_width, 26)
+
+    def test_searching_reserves_header_row(self) -> None:
+        geo = layout_for(10, 40, True)
+        self.assertEqual(geo.body_top, 1)
+
+    def test_zero_size_is_safe(self) -> None:
+        geo = layout_for(0, 0, False)
+        self.assertEqual(geo.body_h, 0)
+        self.assertEqual(geo.list_width, 0)
+
+    def test_never_uses_full_terminal_width(self) -> None:
+        geo = layout_for(20, 16, False)
+        self.assertLess(geo.list_width, 16)
 
 
 class BindingTests(unittest.TestCase):

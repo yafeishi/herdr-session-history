@@ -64,7 +64,13 @@ The rail binds to **that pane only**. Another pane or tab needs its own rail.
 | `r` | Reload |
 | `q` / `esc` | Close this pane's rail |
 
-Jump is skipped while the bound agent is `working`.
+Jump still works while the bound agent is `working` (Grok parks keys in scrollback).
+
+## Tests
+
+```sh
+python3 -m unittest discover -s tests -v
+```
 
 ## Agent support
 

@@ -236,6 +236,16 @@ def format_binding(history_pane: str, target_pane: str) -> str:
     return f"{history_pane}\t{target_pane}"
 
 
+def should_reuse_history(existing: str, bound: str, pane: str) -> bool:
+    """Reuse the open rail only when it is already bound to this pane."""
+    return bool(existing and pane and bound == pane)
+
+
+def should_swap_to_left(history_x: int, conversation_x: int) -> bool:
+    """True when the history split landed to the right of the conversation."""
+    return history_x > conversation_x
+
+
 def row_label(title: str, selected: bool, current: bool, width: int) -> str:
     title = title or "(untitled)"
     if width <= 0:
@@ -289,12 +299,8 @@ def grok_chat_path(cwd: str, session_id: str) -> Path:
 
 def claude_chat_path(cwd: str, session_id: str) -> Path:
     encoded = cwd.replace("/", "-")
-    if encoded.startswith("-"):
-        pass
-    else:
-        encoded = "-" + encoded.lstrip("-")
-    # Claude stores /Users/dang/AICODING as -Users-dang-AICODING
-    encoded = cwd.replace("/", "-")
+    if not encoded.startswith("-"):
+        encoded = "-" + encoded
     return HOME / ".claude" / "projects" / encoded / f"{session_id}.jsonl"
 
 
@@ -544,7 +550,7 @@ def dock_as_left_rail(history_pane: str, conversation_pane: str) -> None:
         return
     my_x = int((mine.get("rect") or {}).get("x") or 0)
     other_x = int((other.get("rect") or {}).get("x") or 0)
-    if my_x > other_x:
+    if should_swap_to_left(my_x, other_x):
         try:
             herdr("pane", "swap", "--source-pane", history_pane, "--target-pane", conversation_pane)
         except RuntimeError:
@@ -873,7 +879,7 @@ def cmd_open() -> int:
     stored = state_pane_file()
     if stored and stored.is_file():
         existing, bound = parse_binding(stored.read_text())
-        if existing and bound == pane:
+        if should_reuse_history(existing, bound, pane):
             try:
                 herdr("plugin", "pane", "focus", existing)
                 return 0
