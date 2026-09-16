@@ -43,6 +43,16 @@ def herdr(*args: str) -> Any:
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "").strip()
         raise RuntimeError(err or f"herdr {' '.join(args)} failed ({proc.returncode})")
+    text = proc.stdout.strip()
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return {"raw": text}
+    if isinstance(data, dict) and "result" in data:
+        return data["result"]
+    return data
 
 
 def herdr_error_code(message: str) -> str:
@@ -99,16 +109,6 @@ def close_own_pane() -> None:
             herdr("pane", "close", me)
         except RuntimeError:
             pass
-    text = proc.stdout.strip()
-    if not text:
-        return {}
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        return {"raw": text}
-    if isinstance(data, dict) and "result" in data:
-        return data["result"]
-    return data
 
 
 def context_json() -> dict[str, Any]:

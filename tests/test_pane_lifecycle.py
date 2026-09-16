@@ -16,6 +16,20 @@ import herdr_session_history as h  # noqa: E402
 NOT_FOUND = '{"error":{"code":"pane_not_found","message":"pane w1:p11 not found"},"id":"cli:pane:get"}'
 
 
+class HerdrResultTests(unittest.TestCase):
+    def test_success_returns_inner_result(self) -> None:
+        fake = mock.Mock(returncode=0, stdout='{"id":"cli:pane:get","result":{"pane":{"pane_id":"w1:p1"}}}\n', stderr="")
+        with mock.patch.object(h.subprocess, "run", return_value=fake):
+            self.assertEqual(h.herdr("pane", "get", "w1:p1"), {"pane": {"pane_id": "w1:p1"}})
+
+    def test_nonzero_raises_with_json_error(self) -> None:
+        fake = mock.Mock(returncode=1, stdout="", stderr=NOT_FOUND)
+        with mock.patch.object(h.subprocess, "run", return_value=fake):
+            with self.assertRaises(RuntimeError) as ctx:
+                h.herdr("pane", "get", "w1:p999")
+            self.assertEqual(h.herdr_error_code(str(ctx.exception)), "pane_not_found")
+
+
 class ErrorCodeTests(unittest.TestCase):
     def test_parses_herdr_json_error(self) -> None:
         self.assertEqual(h.herdr_error_code(NOT_FOUND), "pane_not_found")
