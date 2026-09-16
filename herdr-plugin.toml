@@ -2,7 +2,7 @@ id = "herdr-session-history"
 name = "Herdr Session History"
 version = "0.1.0"
 min_herdr_version = "0.9.0"
-description = "Codex-style session history list for Grok, Claude, Codex, and Agy. Browse past conversations and resume them in a pane."
+description = "Per-pane conversation history rail. Lists turns of the current agent session and jumps Grok scrollback to the selected prompt."
 platforms = ["macos", "linux"]
 
 [[actions]]

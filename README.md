@@ -1,14 +1,60 @@
 # Herdr Session History
 
-Each agent pane has its own conversation history rail. It lists **turns of the current session only** — not other chats, not other panes.
+A compact conversation-history rail for [Herdr](https://herdr.dev). Each agent pane gets its own list of **turns in the current session**. Selecting a row jumps the live Grok scrollback to that user prompt.
 
-Open beside the pane you are in: `prefix+shift+h`
+This is a community plugin, not part of Herdr core.
+
+## Install
+
+Requires **Herdr 0.9+** and **Python 3**.
+
+```sh
+herdr plugin install yafeishi/herdr-session-history
+```
+
+Bind a key (optional):
+
+```toml
+[[keys.command]]
+key = "prefix+shift+h"
+type = "plugin_action"
+command = "herdr-session-history.open"
+description = "open session history"
+```
+
+Reload config: `herdr server reload-config`.
+
+Local checkout:
+
+```sh
+git clone https://github.com/yafeishi/herdr-session-history.git
+herdr plugin link ./herdr-session-history
+```
+
+## Use
+
+Focus an agent pane, then `prefix+shift+h` (or run `herdr plugin action invoke herdr-session-history.open`).
+
+The rail binds to **that pane only**. Another pane or tab needs its own rail.
 
 | Key | Action |
 | --- | --- |
-| `↑` `↓` / `j` `k` / click | Jump the conversation pane to that turn (Grok `Shift+←/→`) |
+| `↑` `↓` / `j` `k` / click | Jump among this chat's turns; Grok scrollback follows (`Tab`, then `Shift+←/→`) |
 | `/` | Search within this chat |
 | `r` | Reload |
 | `q` / `esc` | Close this pane's rail |
 
-Another pane / tab gets its own rail if you open history there.
+Jump is skipped while the bound agent is `working`.
+
+## Agent support
+
+| Agent | Turn list | Jump in the live TUI |
+| --- | --- | --- |
+| Grok | Yes (`chat_history.jsonl`) | Yes |
+| Claude Code | Yes (session jsonl) | Best-effort, same keys |
+| Codex | Not yet | Keys are sent; not guaranteed |
+| Agy | Not yet | No |
+
+## License
+
+[MIT](LICENSE)
