@@ -43,6 +43,62 @@ def herdr(*args: str) -> Any:
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "").strip()
         raise RuntimeError(err or f"herdr {' '.join(args)} failed ({proc.returncode})")
+
+
+def herdr_error_code(message: str) -> str:
+    text = (message or "").strip()
+    if not text:
+        return ""
+    blob = text
+    if not text.startswith("{"):
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            blob = text[start : end + 1]
+    try:
+        data = json.loads(blob)
+    except json.JSONDecodeError:
+        lowered = text.lower()
+        if "pane_not_found" in lowered or ("pane" in lowered and "not found" in lowered):
+            return "pane_not_found"
+        return ""
+    if isinstance(data, dict):
+        err = data.get("error")
+        if isinstance(err, dict):
+            return str(err.get("code") or "")
+    return ""
+
+
+def pane_is_gone(error_code: str) -> bool:
+    return error_code == "pane_not_found"
+
+
+def target_still_open(pane_id: str) -> bool:
+    """False only when Herdr reports the bound pane is gone. Other errors keep the rail."""
+    if not pane_id:
+        return False
+    try:
+        result = herdr("pane", "get", pane_id)
+    except RuntimeError as exc:
+        return not pane_is_gone(herdr_error_code(str(exc)))
+    if isinstance(result, dict):
+        pane = result.get("pane") or result
+        if isinstance(pane, dict) and (pane.get("pane_id") or pane.get("id") or pane.get("tab_id")):
+            return True
+    return True
+
+
+def close_own_pane() -> None:
+    me = os.environ.get("HERDR_PANE_ID") or ""
+    if not me:
+        return
+    try:
+        herdr("plugin", "pane", "close", me)
+    except RuntimeError:
+        try:
+            herdr("pane", "close", me)
+        except RuntimeError:
+            pass
     text = proc.stdout.strip()
     if not text:
         return {}
@@ -784,6 +840,9 @@ class HistoryTUI:
                 time.sleep(0.05)
                 continue
             if key == -1:
+                if not target_still_open(self.target):
+                    close_own_pane()
+                    return
                 _turns, mtime = load_turns_for_pane(self.target)
                 if mtime != self.source_mtime:
                     self.reload()

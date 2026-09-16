@@ -55,7 +55,7 @@ herdr plugin link ./herdr-session-history
 
 Focus an agent pane, then `prefix+shift+h` (or run `herdr plugin action invoke herdr-session-history.open`).
 
-The rail binds to **that pane only**. Another pane or tab needs its own rail.
+The rail binds to **that pane only**. Another pane or tab needs its own rail. Closing the bound agent pane also closes this rail.
 
 | Key | Action |
 | --- | --- |
