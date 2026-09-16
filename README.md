@@ -59,8 +59,9 @@ The rail binds to **that pane only**. Another pane or tab needs its own rail. Cl
 
 | Key | Action |
 | --- | --- |
-| `↑` `↓` / `j` `k` / click | Jump among this chat's turns; Grok scrollback follows (`Tab`, then `Shift+←/→`) |
-| `/` | Search within this chat |
+| `↑` `↓` / `j` `k` | Move in the list; jump after a short pause |
+| click / `enter` | Jump immediately to that turn (`Tab`, then `Shift+←/→`) |
+| `/` | Search within this chat (CJK supported) |
 | `r` | Reload |
 | `q` / `esc` | Close this pane's rail |
 

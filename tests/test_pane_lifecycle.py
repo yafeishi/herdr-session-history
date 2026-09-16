@@ -92,7 +92,10 @@ class FollowCloseLoopTests(unittest.TestCase):
         tui.filtered = []
         tui.viewed_index = 0
         tui.scrollback_primed = False
+        tui.pending_jump = False
+        tui.last_move_at = 0.0
         tui.draw = lambda: None  # type: ignore[assignment]
+        tui.stdscr.get_wch.return_value = -1
 
         orig_open = h.target_still_open
         orig_close = h.close_own_pane

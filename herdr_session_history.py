@@ -292,6 +292,91 @@ def format_binding(history_pane: str, target_pane: str) -> str:
     return f"{history_pane}\t{target_pane}"
 
 
+def pane_id_slug(pane_id: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", (pane_id or "").strip())
+    return slug[:80] or "unknown"
+
+
+def bindings_dir() -> Path | None:
+    root = os.environ.get("HERDR_PLUGIN_STATE_DIR")
+    if not root:
+        return None
+    path = Path(root) / "bindings"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def binding_file_for(target_pane: str) -> Path | None:
+    folder = bindings_dir()
+    if folder is None or not target_pane:
+        return None
+    return folder / pane_id_slug(target_pane)
+
+
+def read_binding_for(target_pane: str) -> tuple[str, str]:
+    path = binding_file_for(target_pane)
+    if path is None or not path.is_file():
+        return "", ""
+    return parse_binding(path.read_text())
+
+
+def write_binding(history_pane: str, target_pane: str) -> None:
+    path = binding_file_for(target_pane)
+    if path is None or not history_pane or not target_pane:
+        return
+    path.write_text(format_binding(history_pane, target_pane))
+
+
+def forget_binding(target_pane: str, history_pane: str = "") -> None:
+    path = binding_file_for(target_pane)
+    if path is None or not path.is_file():
+        return
+    existing, bound = parse_binding(path.read_text())
+    if history_pane and existing and existing != history_pane:
+        return
+    if bound and target_pane and bound != target_pane:
+        return
+    path.unlink(missing_ok=True)
+
+
+def decode_search_input(key: int | str) -> str | None:
+    """Appendable search text. Accepts CJK from get_wch; ignores control keys."""
+    if isinstance(key, str):
+        if len(key) == 1 and ord(key) < 32:
+            return None
+        return key if key.isprintable() else None
+    if 32 <= int(key) <= 126:
+        return chr(int(key))
+    return None
+
+
+def read_curses_key(stdscr: curses.window) -> int | str:
+    try:
+        value = stdscr.get_wch()
+    except curses.error:
+        return -1
+    except AttributeError:
+        try:
+            return stdscr.getch()
+        except curses.error:
+            return -1
+    if value == "":
+        return -1
+    if isinstance(value, str) and len(value) == 1:
+        code = ord(value)
+        if code in (10, 13):
+            return 10
+        if code == 27:
+            return 27
+        if code in (8, 127):
+            return curses.KEY_BACKSPACE
+    return value
+
+
+def should_flush_jump(pending: bool, idle_s: float, debounce_s: float = 0.2) -> bool:
+    return bool(pending) and idle_s >= debounce_s
+
+
 def should_reuse_history(existing: str, bound: str, pane: str) -> bool:
     """Reuse the open rail only when it is already bound to this pane."""
     return bool(existing and pane and bound == pane)
@@ -513,6 +598,8 @@ def pane_session_id(pane_id: str) -> str:
 
 
 JUMP_KEY_PAUSE = 0.02
+JUMP_KEY_CHUNK = 40
+JUMP_DEBOUNCE_S = 0.2
 
 
 def send_keys(pane_id: str, *keys: str) -> None:
@@ -525,10 +612,15 @@ def send_keys(pane_id: str, *keys: str) -> None:
 
 
 def send_keys_paced(pane_id: str, keys: list[str] | tuple[str, ...], pause: float | None = None) -> None:
+    """Send the chord in a few herdr calls, not one subprocess per key."""
+    sequence = [key for key in keys if key]
+    if not sequence:
+        return
     delay = JUMP_KEY_PAUSE if pause is None else pause
-    for i, key in enumerate(keys):
-        send_keys(pane_id, key)
-        if delay and i + 1 < len(keys):
+    for index in range(0, len(sequence), JUMP_KEY_CHUNK):
+        chunk = sequence[index : index + JUMP_KEY_CHUNK]
+        send_keys(pane_id, *chunk)
+        if delay and index + JUMP_KEY_CHUNK < len(sequence):
             time.sleep(delay)
 
 
@@ -656,6 +748,8 @@ class HistoryTUI:
         self.filtered: list[Turn] = []
         self.viewed_index = 0
         self.scrollback_primed = False
+        self.pending_jump = False
+        self.last_move_at = 0.0
         self.reload(follow_latest=True)
         if self.filtered:
             self.viewed_index = self.filtered[-1].index
@@ -825,17 +919,27 @@ class HistoryTUI:
             self.status = f"#{turn.index + 1}/{len(self.turns)}"
         except Exception as exc:  # noqa: BLE001
             self.status = str(exc).splitlines()[0][:80]
+        self.pending_jump = False
+
+    def note_cursor_move(self) -> None:
+        self.pending_jump = True
+        self.last_move_at = time.monotonic()
+
+    def flush_jump_if_idle(self) -> None:
+        idle = time.monotonic() - self.last_move_at
+        if should_flush_jump(self.pending_jump, idle, JUMP_DEBOUNCE_S):
+            self.jump_here()
 
     def run(self) -> None:
         curses.curs_set(0)
         curses.use_default_colors()
-        self.stdscr.timeout(700)
         self.stdscr.keypad(True)
         curses.mousemask(curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED)
         while True:
+            self.stdscr.timeout(50 if self.pending_jump else 700)
             try:
                 self.draw()
-                key = self.stdscr.getch()
+                key = read_curses_key(self.stdscr)
             except curses.error:
                 time.sleep(0.05)
                 continue
@@ -843,6 +947,7 @@ class HistoryTUI:
                 if not target_still_open(self.target):
                     close_own_pane()
                     return
+                self.flush_jump_if_idle()
                 _turns, mtime = load_turns_for_pane(self.target)
                 if mtime != self.source_mtime:
                     self.reload()
@@ -857,30 +962,32 @@ class HistoryTUI:
                     self.apply_filter()
                 elif key in (10, 13):
                     self.searching = False
-                elif 32 <= key <= 126:
-                    self.query += chr(key)
-                    self.apply_filter()
+                else:
+                    text = decode_search_input(key)
+                    if text:
+                        self.query += text
+                        self.apply_filter()
                 continue
-            if key in (ord("q"), 27):
+            if key in (ord("q"), 27, "q"):
                 return
-            if key in (curses.KEY_UP, ord("k")):
+            if key in (curses.KEY_UP, ord("k"), "k"):
                 self.cursor = max(0, self.cursor - 1)
-                self.jump_here()
-            elif key in (curses.KEY_DOWN, ord("j")):
+                self.note_cursor_move()
+            elif key in (curses.KEY_DOWN, ord("j"), "j"):
                 self.cursor = min(max(0, len(self.filtered) - 1), self.cursor + 1)
-                self.jump_here()
+                self.note_cursor_move()
             elif key == curses.KEY_PPAGE:
                 self.cursor = max(0, self.cursor - 10)
-                self.jump_here()
+                self.note_cursor_move()
             elif key == curses.KEY_NPAGE:
                 self.cursor = min(max(0, len(self.filtered) - 1), self.cursor + 10)
-                self.jump_here()
+                self.note_cursor_move()
             elif key in (10, 13):
                 self.jump_here()
-            elif key == ord("/"):
+            elif key in (ord("/"), "/"):
                 self.searching = True
                 self.query = ""
-            elif key == ord("r"):
+            elif key in (ord("r"), "r"):
                 self.reload()
             elif key == curses.KEY_MOUSE:
                 try:
@@ -917,11 +1024,10 @@ def state_pane_file() -> Path | None:
 
 
 def remember_pane() -> None:
-    path = state_pane_file()
     pane = os.environ.get("HERDR_PANE_ID") or ""
     target = os.environ.get("HERDR_SESSION_HISTORY_TARGET") or ""
-    if path and pane:
-        path.write_text(format_binding(pane, target))
+    if pane and target:
+        write_binding(pane, target)
 
 
 def cmd_open() -> int:
@@ -935,15 +1041,13 @@ def cmd_open() -> int:
         env_args.extend(["--env", f"HERDR_SESSION_HISTORY_TARGET={pane}"])
     if cwd:
         env_args.extend(["--env", f"HERDR_SESSION_HISTORY_CWD={cwd}"])
-    stored = state_pane_file()
-    if stored and stored.is_file():
-        existing, bound = parse_binding(stored.read_text())
-        if should_reuse_history(existing, bound, pane):
-            try:
-                herdr("plugin", "pane", "focus", existing)
-                return 0
-            except RuntimeError:
-                stored.unlink(missing_ok=True)
+    existing, bound = read_binding_for(pane)
+    if should_reuse_history(existing, bound, pane):
+        try:
+            herdr("plugin", "pane", "focus", existing)
+            return 0
+        except RuntimeError:
+            forget_binding(pane, existing)
     opened = herdr(
         "plugin",
         "pane",
@@ -964,15 +1068,15 @@ def cmd_open() -> int:
     if isinstance(opened, dict):
         hist = pick_id((opened.get("plugin_pane") or {}).get("pane") or {}, "pane_id", "id")
     if hist:
-        remember = state_pane_file()
-        if remember:
-            remember.write_text(format_binding(hist, pane))
+        write_binding(hist, pane)
         dock_as_left_rail(hist, pane)
     return 0
 
 
 def cmd_tui() -> int:
     remember_pane()
+    me = os.environ.get("HERDR_PANE_ID") or ""
+    target = os.environ.get("HERDR_SESSION_HISTORY_TARGET") or ""
     try:
         locale.setlocale(locale.LC_ALL, "")
     except locale.Error:
@@ -982,9 +1086,7 @@ def cmd_tui() -> int:
     except (KeyboardInterrupt, curses.error):
         return 0
     finally:
-        stored = state_pane_file()
-        if stored and stored.is_file():
-            stored.unlink(missing_ok=True)
+        forget_binding(target, me)
     return 0
 
 

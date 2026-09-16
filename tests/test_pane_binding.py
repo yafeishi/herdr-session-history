@@ -128,7 +128,9 @@ class JumpScrollbackIntegrationTests(unittest.TestCase):
 
         primed = h.jump_scrollback("w1:p1", 0, 3, False)
         self.assertTrue(primed)
-        keys = [call[3] for call in sent if call[:3] == ("agent", "send-keys", "w1:p1")]
+        agent_calls = [call for call in sent if call[:3] == ("agent", "send-keys", "w1:p1")]
+        self.assertEqual(len(agent_calls), 1)
+        keys = list(agent_calls[0][3:])
         self.assertEqual(keys[0], "tab")
         self.assertEqual(keys.count("shift+right"), 3)
         self.assertEqual(keys.count("shift+left"), 2)
