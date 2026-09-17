@@ -92,6 +92,7 @@ class FollowCloseLoopTests(unittest.TestCase):
         tui.filtered = []
         tui.viewed_index = 0
         tui.scrollback_primed = False
+        tui.primed_session = ""
         tui.pending_jump = False
         tui.last_move_at = 0.0
         tui.draw = lambda: None  # type: ignore[assignment]

@@ -157,17 +157,45 @@ def target_pane_file() -> Path | None:
     return Path(root) / "target_pane"
 
 
+def focused_agent_pane() -> str:
+    """The agent under current focus. Empty if the focused pane is a shell or plugin."""
+    ctx = context_json()
+    candidates: list[str] = []
+    for key in ("focused_pane_id", "pane_id"):
+        value = ctx.get(key)
+        if isinstance(value, str) and value:
+            candidates.append(value)
+    pane = ctx.get("pane") or ctx.get("focused_pane") or {}
+    nested = pick_id(pane, "pane_id", "id")
+    if nested:
+        candidates.append(nested)
+    seen: set[str] = set()
+    for value in candidates:
+        if value in seen:
+            continue
+        seen.add(value)
+        record = pane_record(value)
+        if record.get("agent"):
+            return value
+    return ""
+
+
+def resolve_open_target() -> str:
+    """Pane to bind a new rail. Never falls back to a stale global target file."""
+    env = os.environ.get("HERDR_SESSION_HISTORY_TARGET") or ""
+    if env:
+        record = pane_record(env)
+        return env if record.get("agent") else ""
+    return focused_agent_pane()
+
+
 def invoker_pane() -> str:
     env = os.environ.get("HERDR_SESSION_HISTORY_TARGET") or ""
     if env:
         return env
-    ctx = context_json()
-    for key in ("focused_pane_id", "pane_id"):
-        value = ctx.get(key)
-        if isinstance(value, str) and value:
-            record = pane_record(value)
-            if record.get("agent"):
-                return value
+    agent = focused_agent_pane()
+    if agent:
+        return agent
     stored = target_pane_file()
     if stored and stored.is_file():
         value = stored.read_text().strip()
@@ -177,8 +205,7 @@ def invoker_pane() -> str:
     sibling = sibling_agent_pane(me)
     if sibling:
         return sibling
-    pane = ctx.get("pane") or ctx.get("focused_pane") or {}
-    return pick_id(pane, "pane_id", "id")
+    return ""
 
 
 def workspace_cwd() -> str:
@@ -631,6 +658,24 @@ class ScrollJump:
     skip_reason: str = ""
 
 
+def jump_still_primed(
+    *,
+    primed: bool,
+    session_id: str,
+    primed_session: str,
+    target_focused: bool,
+    status: str,
+) -> bool:
+    """False when Tab must be sent again (new session, or user returned to the prompt)."""
+    if not primed:
+        return False
+    if session_id and primed_session and session_id != primed_session:
+        return False
+    if target_focused and status != "working":
+        return False
+    return True
+
+
 def plan_scroll_jump(
     *,
     kind: str,
@@ -658,12 +703,27 @@ def plan_scroll_jump(
     return ScrollJump(tuple(keys), next_primed)
 
 
-def jump_scrollback(pane_id: str, to_index: int, turn_count: int, primed: bool) -> bool:
+def jump_scrollback(
+    pane_id: str,
+    to_index: int,
+    turn_count: int,
+    primed: bool,
+    primed_session: str = "",
+) -> bool:
     """Move Grok/Claude scrollback to a user-turn. Returns primed."""
     record = pane_record(pane_id)
+    session = record.get("agent_session") if isinstance(record.get("agent_session"), dict) else {}
+    status = str(record.get("agent_status") or "")
+    primed = jump_still_primed(
+        primed=primed,
+        session_id=str(session.get("value") or ""),
+        primed_session=primed_session,
+        target_focused=bool(record.get("focused")),
+        status=status,
+    )
     plan = plan_scroll_jump(
         kind=str(record.get("agent") or ""),
-        status=str(record.get("agent_status") or ""),
+        status=status,
         to_index=to_index,
         turn_count=turn_count,
         primed=primed,
@@ -748,6 +808,7 @@ class HistoryTUI:
         self.filtered: list[Turn] = []
         self.viewed_index = 0
         self.scrollback_primed = False
+        self.primed_session = ""
         self.pending_jump = False
         self.last_move_at = 0.0
         self.reload(follow_latest=True)
@@ -755,6 +816,9 @@ class HistoryTUI:
             self.viewed_index = self.filtered[-1].index
 
     def reload(self, follow_latest: bool = False) -> None:
+        session = pane_session_id(self.target)
+        if session != self.primed_session:
+            self.scrollback_primed = False
         self.turns, self.source_mtime = load_turns_for_pane(self.target)
         previous_last = follow_latest or (self.filtered and self.cursor == len(self.filtered) - 1)
         self.apply_filter()
@@ -914,7 +978,9 @@ class HistoryTUI:
                 turn.index,
                 len(self.turns),
                 self.scrollback_primed,
+                self.primed_session,
             )
+            self.primed_session = pane_session_id(self.target)
             self.viewed_index = turn.index
             self.status = f"#{turn.index + 1}/{len(self.turns)}"
         except Exception as exc:  # noqa: BLE001
@@ -947,6 +1013,13 @@ class HistoryTUI:
                 if not target_still_open(self.target):
                     close_own_pane()
                     return
+                record = pane_record(self.target)
+                status = str(record.get("agent_status") or "")
+                if record.get("focused") and status != "working":
+                    self.scrollback_primed = False
+                session = pane_session_id(self.target)
+                if session != self.primed_session:
+                    self.scrollback_primed = False
                 self.flush_jump_if_idle()
                 _turns, mtime = load_turns_for_pane(self.target)
                 if mtime != self.source_mtime:
@@ -987,6 +1060,7 @@ class HistoryTUI:
             elif key in (ord("/"), "/"):
                 self.searching = True
                 self.query = ""
+                self.pending_jump = False
             elif key in (ord("r"), "r"):
                 self.reload()
             elif key == curses.KEY_MOUSE:
@@ -1031,7 +1105,10 @@ def remember_pane() -> None:
 
 
 def cmd_open() -> int:
-    pane = invoker_pane()
+    pane = resolve_open_target()
+    if not pane:
+        sys.stderr.write("focus an agent pane, then open session history\n")
+        return 1
     pending = target_pane_file()
     if pending and pane:
         pending.write_text(pane)

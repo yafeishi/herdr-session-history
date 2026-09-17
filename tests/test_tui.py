@@ -31,6 +31,9 @@ def make_tui(turns: list[h.Turn] | None = None) -> h.HistoryTUI:
     tui.filtered = list(tui.turns)
     tui.viewed_index = tui.turns[-1].index
     tui.scrollback_primed = False
+    tui.primed_session = ""
+    tui.pending_jump = False
+    tui.last_move_at = 0.0
     return tui
 
 
@@ -63,7 +66,7 @@ class FilterTests(unittest.TestCase):
         tui.cursor = 0
         calls: list[tuple] = []
 
-        def fake_jump(pane, to_index, turn_count, primed):
+        def fake_jump(pane, to_index, turn_count, primed, primed_session=""):
             calls.append((pane, to_index, turn_count, primed))
             return True
 

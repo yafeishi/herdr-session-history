@@ -64,6 +64,72 @@ class SearchInputTests(unittest.TestCase):
         self.assertIsNone(h.decode_search_input(curses_key_up()))
 
 
+class JumpPrimeTests(unittest.TestCase):
+    def test_new_session_invalidates_prime(self) -> None:
+        self.assertFalse(
+            h.jump_still_primed(
+                primed=True,
+                session_id="sess-b",
+                primed_session="sess-a",
+                target_focused=False,
+                status="idle",
+            )
+        )
+
+    def test_user_returning_to_prompt_invalidates_prime(self) -> None:
+        self.assertFalse(
+            h.jump_still_primed(
+                primed=True,
+                session_id="sess-a",
+                primed_session="sess-a",
+                target_focused=True,
+                status="idle",
+            )
+        )
+
+    def test_working_keeps_prime_even_if_focused(self) -> None:
+        self.assertTrue(
+            h.jump_still_primed(
+                primed=True,
+                session_id="sess-a",
+                primed_session="sess-a",
+                target_focused=True,
+                status="working",
+            )
+        )
+
+    def test_idle_unfocused_keeps_prime(self) -> None:
+        self.assertTrue(
+            h.jump_still_primed(
+                primed=True,
+                session_id="sess-a",
+                primed_session="sess-a",
+                target_focused=False,
+                status="idle",
+            )
+        )
+
+    def test_stale_prime_sends_tab_again(self) -> None:
+        sent: list[tuple] = []
+        orig_herdr = h.herdr
+        orig_record = h.pane_record
+        h.herdr = lambda *args: sent.append(args) or {}  # type: ignore[assignment]
+        h.pane_record = lambda pid: {  # type: ignore[assignment]
+            "agent": "grok",
+            "agent_status": "idle",
+            "focused": True,
+            "agent_session": {"value": "sess-2"},
+        }
+        pause = h.JUMP_KEY_PAUSE
+        h.JUMP_KEY_PAUSE = 0
+        self.addCleanup(lambda: setattr(h, "herdr", orig_herdr))
+        self.addCleanup(lambda: setattr(h, "pane_record", orig_record))
+        self.addCleanup(lambda: setattr(h, "JUMP_KEY_PAUSE", pause))
+        h.jump_scrollback("w1:p1", 0, 2, True, "sess-1")
+        keys = list(sent[0][3:])
+        self.assertEqual(keys[0], "tab")
+
+
 class JumpDebounceTests(unittest.TestCase):
     def test_flush_only_after_idle(self) -> None:
         self.assertFalse(h.should_flush_jump(True, 0.05, 0.2))
@@ -79,6 +145,7 @@ class JumpDebounceTests(unittest.TestCase):
         tui.pending_jump = False
         tui.last_move_at = 0.0
         tui.scrollback_primed = False
+        tui.primed_session = ""
         tui.status = ""
         tui.viewed_index = 1
         jumps: list[int] = []

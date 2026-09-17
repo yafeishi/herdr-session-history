@@ -46,6 +46,28 @@ class InvokerPaneTests(unittest.TestCase):
             Path(tmp, "target_pane").write_text("w1:p5\n")
             self.assertEqual(h.invoker_pane(), "w1:p5")
 
+    def test_open_ignores_stale_target_when_focus_is_a_shell(self) -> None:
+        os.environ.pop("HERDR_SESSION_HISTORY_TARGET", None)
+        os.environ["HERDR_PLUGIN_CONTEXT_JSON"] = json.dumps({"focused_pane_id": "w1:p9"})
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["HERDR_PLUGIN_STATE_DIR"] = tmp
+            Path(tmp, "target_pane").write_text("w1:p5\n")
+            orig = h.pane_record
+            h.pane_record = lambda pid: {"agent": "grok"} if pid == "w1:p5" else {}  # type: ignore[assignment]
+            self.addCleanup(lambda: setattr(h, "pane_record", orig))
+            self.assertEqual(h.resolve_open_target(), "")
+            self.assertEqual(h.invoker_pane(), "w1:p5")
+            with mock.patch.object(sys, "stderr", mock.Mock()):
+                self.assertEqual(h.cmd_open(), 1)
+
+    def test_open_uses_focused_agent_not_sibling(self) -> None:
+        os.environ.pop("HERDR_SESSION_HISTORY_TARGET", None)
+        os.environ["HERDR_PLUGIN_CONTEXT_JSON"] = json.dumps({"focused_pane_id": "w1:p11"})
+        orig = h.pane_record
+        h.pane_record = lambda pid: {"agent": "grok"} if pid == "w1:p11" else {}  # type: ignore[assignment]
+        self.addCleanup(lambda: setattr(h, "pane_record", orig))
+        self.assertEqual(h.resolve_open_target(), "w1:p11")
+
     def test_invalid_context_json_is_empty(self) -> None:
         os.environ["HERDR_PLUGIN_CONTEXT_JSON"] = "{not json"
         self.assertEqual(h.context_json(), {})
