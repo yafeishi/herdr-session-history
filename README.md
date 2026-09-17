@@ -1,5 +1,7 @@
 # Herdr Session History
 
+[简体中文](README.zh-CN.md)
+
 A compact conversation-history rail for [Herdr](https://herdr.dev). Each agent pane gets its own list of **turns in the current session**. Selecting a row jumps the live Grok scrollback to that user prompt.
 
 This is a community plugin, not part of Herdr core.
